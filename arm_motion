@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 
-import os
-import sys
 import rospy
 import moveit_commander
-import geometry_msgs.msg
-
-from moveit_commander import RobotState, RobotTrajectory
 import numpy as np
 from tf import transformations as T
 
@@ -47,12 +42,12 @@ def main():
     current_joints = arm_group.get_current_joint_values()
     start_values = current_joints
     joint_limits = {
-        'arm_lift_joint': (0.0, 0.69),      # in meters
-        'arm_flex_joint': (-2.62, 0.0),     # in radians
-        'arm_roll_joint': (-2.09, 3.84),    # in radians
-        'wrist_flex_joint': (-1.92, 1.92),  # in radians
-        'wrist_roll_joint': (-2.09, 3.84),   # in radians
-        'wrist_ft_sensor_frame_joint': (-3.05, 3.05),  # in radians
+        "arm_lift_joint": (0.0, 0.69),  # in meters
+        "arm_flex_joint": (-2.62, 0.0),  # in radians
+        "arm_roll_joint": (-2.09, 3.84),  # in radians
+        "wrist_flex_joint": (-1.92, 1.92),  # in radians
+        "wrist_roll_joint": (-2.09, 3.84),  # in radians
+        "wrist_ft_sensor_frame_joint": (-3.05, 3.05),  # in radians
     }
 
     # Generate a reasonable random goal configuration
@@ -64,23 +59,25 @@ def main():
 
     motion_gen = get_arm_motion_gen(arm_group)
 
-    domain_pddl = read('/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain_arm.pddl')
-    stream_pddl = read('/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream_arm.pddl')
+    domain_pddl = read(
+        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain_arm.pddl"
+    )
+    stream_pddl = read(
+        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream_arm.pddl"
+    )
 
     start_conf = Conf(arm_group, arm_joints, start_values)
     goal_conf = Conf(arm_group, arm_joints, goal_values)
 
     init = [
-        ('Arm', 'arm'),
-        ('ArmConf', start_conf),
-        ('ArmConf', goal_conf),
-        ('AtArmConf', 'arm', start_conf)
+        ("Arm", "arm"),
+        ("ArmConf", start_conf),
+        ("ArmConf", goal_conf),
+        ("AtArmConf", "arm", start_conf),
     ]
-    goal = ('AtArmConf', 'arm', goal_conf)
+    goal = ("AtArmConf", "arm", goal_conf)
 
-    stream_map = {
-        'plan-arm-motion': from_fn(motion_gen)
-    }
+    stream_map = {"plan-arm-motion": from_fn(motion_gen)}
 
     # Create and solve problem
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
@@ -96,9 +93,8 @@ def main():
         rospy.loginfo("Failed to find a plan")
         return
     for name, args in plan:
-        if name == 'move_arm':
+        if name == "move_arm":
             a, q1, t, q2 = args
-            import pdb; pdb.set_trace()
 
             trajectory = t.commands[0]
             if trajectory.moveit_plan is not None:
@@ -110,13 +106,14 @@ def main():
                     q1.values[1],  # y
                     q1.values[2],  # theta
                 ]
-                robot.set_joint_value_target('world_joint', joint_values)
+                robot.set_joint_value_target("world_joint", joint_values)
                 success = robot.go(wait=True)
                 if not success:
                     rospy.logwarn("Failed to execute the plan")
                     return
         else:
             import pdb; pdb.set_trace()
+
 
 if __name__ == "__main__":
     main()

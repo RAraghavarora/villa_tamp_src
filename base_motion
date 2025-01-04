@@ -16,7 +16,9 @@ def main():
     while not rospy.is_shutdown():
         try:
             # Possible Groups: ['arm', 'base', 'gripper', 'head', 'whole_body', 'whole_body_light', 'whole_body_weighted']
-            base = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+            base = moveit_commander.MoveGroupCommander(
+                "whole_body", wait_for_servers=0.0
+            )
             # World_body joints: ['world_joint', 'arm_lift_joint', 'arm_flex_joint', 'arm_roll_joint', 'wrist_flex_joint', 'wrist_roll_joint', 'wrist_ft_sensor_frame_joint']
             base.set_pose_reference_frame("map")
             scene = moveit_commander.PlanningSceneInterface()
@@ -30,10 +32,14 @@ def main():
     rospy.loginfo("robot.get_planning_time(): %s", robot.get_planning_time())
     motion_gen = get_base_motion_gen(robot)
 
-    domain_pddl = read('/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl')
-    stream_pddl = read('/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl')
+    domain_pddl = read(
+        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl"
+    )
+    stream_pddl = read(
+        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl"
+    )
 
-    start_joints = ['base_x', 'base_y', 'base_theta']
+    start_joints = ["base_x", "base_y", "base_theta"]
     start_values = [0, 0, 0]
     goal_values = [1, 0.5, 0]
     random_pose = robot.get_random_pose()
@@ -44,25 +50,21 @@ def main():
         random_pose.pose.orientation.x,
         random_pose.pose.orientation.y,
         random_pose.pose.orientation.z,
-        random_pose.pose.orientation.w
+        random_pose.pose.orientation.w,
     )
     euler = T.euler_from_quaternion(quaternion)
     theta = euler[2]  # yaw
-    goal_values = [x,y,theta]
+    goal_values = [x, y, theta]
     rospy.loginfo("Goal values: %s", goal_values)
     start_conf = Conf(robot, start_joints, start_values)
     goal_conf = Conf(robot, start_joints, goal_values)
 
     # Initialize problem
-    init = [
-        ('BConf', start_conf),
-        ('AtBConf', start_conf),
-        ('BConf', goal_conf)
-    ]
-    goal = ('AtBConf', goal_conf)
+    init = [("BConf", start_conf), ("AtBConf", start_conf), ("BConf", goal_conf)]
+    goal = ("AtBConf", goal_conf)
 
     stream_map = {
-        'plan-base-motion': from_fn(motion_gen),
+        "plan-base-motion": from_fn(motion_gen),
     }
 
     # Create and solve problem
@@ -79,7 +81,7 @@ def main():
         rospy.loginfo("Failed to find a plan")
         return
     for name, args in plan:
-        if name == 'move_base':
+        if name == "move_base":
             q1, t, q2 = args
             # Set final target
             trajectory = t.commands[0]
@@ -91,11 +93,12 @@ def main():
                     q2.values[1],  # y
                     q2.values[2],  # theta
                 ]
-                robot.set_joint_value_target('world_joint', joint_values)
+                robot.set_joint_value_target("world_joint", joint_values)
                 success = robot.go(wait=True)
                 if not success:
                     rospy.logwarn("Failed to execute the plan")
                     return
+
 
 if __name__ == "__main__":
     main()
