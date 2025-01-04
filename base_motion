@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+import rospy
+import moveit_commander
+from tf import transformations as T
+
+from pddlstream.algorithms.meta import solve
+from pddlstream.utils import read
+from pddlstream.language.generator import from_fn
+from pddlstream.language.constants import PDDLProblem
+from stream import get_base_motion_gen
+from primitives import Conf
+
+
+def main():
+    rospy.init_node("tamp")
+    while not rospy.is_shutdown():
+        try:
+            # Possible Groups: ['arm', 'base', 'gripper', 'head', 'whole_body', 'whole_body_light', 'whole_body_weighted']
+            base = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+            # World_body joints: ['world_joint', 'arm_lift_joint', 'arm_flex_joint', 'arm_roll_joint', 'wrist_flex_joint', 'wrist_roll_joint', 'wrist_ft_sensor_frame_joint']
+            base.set_pose_reference_frame("map")
+            scene = moveit_commander.PlanningSceneInterface()
+            break
+        except RuntimeError as e:
+            print("Failed to launch, retrying ", e)
+            rospy.sleep(1.0)
+
+    # Create problem instance and robot command interface
+    robot = base  # This represents our robot interface
+    rospy.loginfo("robot.get_planning_time(): %s", robot.get_planning_time())
+    motion_gen = get_base_motion_gen(robot)
+
+    domain_pddl = read('/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl')
+    stream_pddl = read('/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl')
+
+    start_joints = ['base_x', 'base_y', 'base_theta']
+    start_values = [0, 0, 0]
+    goal_values = [1, 0.5, 0]
+    random_pose = robot.get_random_pose()
+    x = random_pose.pose.position.x
+    y = random_pose.pose.position.y
+    # Get theta from quaternion
+    quaternion = (
+        random_pose.pose.orientation.x,
+        random_pose.pose.orientation.y,
+        random_pose.pose.orientation.z,
+        random_pose.pose.orientation.w
+    )
+    euler = T.euler_from_quaternion(quaternion)
+    theta = euler[2]  # yaw
+    goal_values = [x,y,theta]
+    rospy.loginfo("Goal values: %s", goal_values)
+    start_conf = Conf(robot, start_joints, start_values)
+    goal_conf = Conf(robot, start_joints, goal_values)
+
+    # Initialize problem
+    init = [
+        ('BConf', start_conf),
+        ('AtBConf', start_conf),
+        ('BConf', goal_conf)
+    ]
+    goal = ('AtBConf', goal_conf)
+
+    stream_map = {
+        'plan-base-motion': from_fn(motion_gen),
+    }
+
+    # Create and solve problem
+    pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
+    solution = solve(pddl_problem)
+
+    if solution is None:
+        rospy.loginfo("No solution found")
+        return
+
+    # Execute the solution
+    plan, cost, evaluations = solution
+    if plan is None:
+        rospy.loginfo("Failed to find a plan")
+        return
+    for name, args in plan:
+        if name == 'move_base':
+            q1, t, q2 = args
+            # Set final target
+            trajectory = t.commands[0]
+            if trajectory.moveit_plan is not None:
+                robot.execute(trajectory.moveit_plan)
+            else:
+                joint_values = [
+                    q2.values[0],  # x
+                    q2.values[1],  # y
+                    q2.values[2],  # theta
+                ]
+                robot.set_joint_value_target('world_joint', joint_values)
+                success = robot.go(wait=True)
+                if not success:
+                    rospy.logwarn("Failed to execute the plan")
+                    return
+
+if __name__ == "__main__":
+    main()

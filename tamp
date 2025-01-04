@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+
+import sys
+import rospy
+import moveit_commander
+import geometry_msgs.msg
+from moveit_commander import RobotState, RobotTrajectory
+import numpy as np
+import tf2_ros
+from tf import transformations as T
+
+from hsrb_interface import Robot, exceptions
+import knowledge_representation
+from std_srvs.srv import Empty
+
+from villa_helpers.groovy_motion import GroovyMotion
+from villa_helpers.fast_move import FastMove
+
+from dynamic_scene_graph.srv import StartScan, StartScanRequest, FinishScan, FinishScanRequest, \
+                                    GetSurfaces, GetSurfacesRequest, QueryObject, QueryObjectRequest, \
+                                    VisualizeObject, VisualizeObjectRequest, GetObjectsOnSurface, \
+                                    GetObjectsOnSurfaceRequest
+from dynamic_scene_graph.msg import BoundingBox3D
+from dynamic_scene_graph import ros_utils
+from pick_and_place import utils
+
+import math
+from copy import deepcopy
+
+def main():
+    moveit_commander.roscpp_initialize(sys.argv)
+    rospy.init_node('tamp')
+    while not rospy.is_shutdown():
+        try:
+            moveit_commander.roscpp_initialize(sys.argv)
+            whole_body = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+            whole_body.set_pose_reference_frame("map")
+            end_effector = whole_body.get_end_effector_link()
+            scene = moveit_commander.PlanningSceneInterface()
+            break
+
+        except RuntimeError as e:
+            print("Failed to launch, retrying ", e)
+    
+
+    # print("tamp node started")
+    # while not rospy.is_shutdown():
+    #     try:
+    #         robot = Robot()
+    #         whole_body = robot.try_get('whole_body')
+    #         groovy_motion = GroovyMotion()
+    #         omni_base = robot.try_get('omni_base')
+    #         gripper = robot.try_get('gripper')
+    #         collision_world = robot.try_get('global_collision_world')
+    #         fast_move = FastMove(omni_base)
+    #         break
+    #     except (exceptions.ResourceNotFoundError, exceptions.RobotConnectionError) as e:
+    #         rospy.logerr_throttle(1, 'Failed to obtain resource: {}\nRetrying...'.format(e))
+
+    # rospy.loginfo(robot)
+    # rospy.loginfo(whole_body)
+    # rospy.loginfo(groovy_motion)
+    # rospy.loginfo(omni_base)
+    # rospy.loginfo(gripper)
+    # rospy.loginfo(collision_world)
+    # rospy.loginfo(fast_move)
+
+    # ltmc = knowledge_representation.get_default_ltmc()
+    # simulation = rospy.get_param("~simulation", False)
+    # table_name = rospy.get_param("~table", "table") # "long_table") # # "desk") #
+    # cabinet_name = rospy.get_param("~cabinet", "cupboard")
+
+    # rospy.loginfo(table_name)
+    # rospy.loginfo(cabinet_name)
+
+    # print(robot.list())
+
+    # commander = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+    # commander.set_pose_reference_frame("map")
+    # end_effector = commander.get_end_effector_link()
+    # scene = moveit_commander.PlanningSceneInterface(ns="villa", synchronous=False)
+
+    # arm = moveit_commander.MoveGroupCommander("arm", wait_for_servers=0.0)
+    # base = moveit_commander.MoveGroupCommander("base", wait_for_servers=0.0)
+    # head = moveit_commander.MoveGroupCommander("head", wait_for_servers=0.0)
+    # wb = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+    # scene = moveit_commander.PlanningSceneInterface()
+    # rospy.sleep(1)
+
+    # add wall
+    # table_size = [0.01, 0.6, 0.6]
+    # p = geometry_msgs.msg.PoseStamped()
+    # p.header.frame_id = "odom"
+    # p.pose.position.x = 0.53
+    # p.pose.position.y = 0.0
+    # p.pose.position.z = 0.6
+    # p.pose.orientation.w = 1.0
+    # scene.add_box("wall", p, table_size)
+    # rospy.sleep(1)
+
+    random_pose = whole_body.get_random_pose()
+    print(random_pose)
+    random_plan = whole_body.plan(random_pose)
+    print(random_plan)
+    whole_body.execute(random_plan[1])
+    
+    # whole_body.execute(plan)
+    # rospy.logdebug("done")
+    # rospy.sleep(0.0)
+    # Move to go
+    # whole_body.planning_timeout = 5
+    # print(whole_body.planning_timeout)
+    # go_traj = whole_body.move_to_go(plan_only=True)
+    # print(go_traj)
+
+    # stop_head = rospy.ServiceProxy('/viewpoint_controller/stop', Empty)
+
+
+
+    # Scan table
+    # pose = ltmc.get_map('map').get_pose(table_name)
+    # surface_instance = ltmc.get_concept('location').get_instance_named(table_name)
+    # surface_height = surface_instance.get_attributes('height')[0].get_float_value()
+    # surface_width = surface_instance.get_attributes('width')[0].get_float_value()
+    # surface_depth = surface_instance.get_attributes('depth')[0].get_float_value()
+    # surface_to_map = T.rotation_matrix(pose.theta, (0, 0, 1))
+    # surface_to_map = T.translation_matrix([pose.x, pose.y, surface_height]) @ surface_to_map
+
+    # # x points out of the surface, parallel to depth, towards the approach position
+    # approach_dist = 0.6
+    # front_approach_to_surface_x = surface_depth/2 + approach_dist
+    # front_approach_to_surface_y = 0
+    # front_approach_to_surface = T.translation_matrix([front_approach_to_surface_x, front_approach_to_surface_y, 0]) \
+    #                             @ T.rotation_matrix(-np.pi, (0, 0, 1)) # facing negative x of surface
+
+    # front_approach_to_map = surface_to_map @ front_approach_to_surface
+
+    # _, _, theta = T.euler_from_matrix(front_approach_to_map)
+    # x, y, _ = T.translation_from_matrix(front_approach_to_map)
+    # print (x, y, theta)
+    # success = fast_move.go(x, y, yaw=theta, angular_thresh=10, relative=False)
+    # stop_head()
+
+    # # tilt and pan to look at 0.1m above the center of the surface
+    # tfBuffer = tf2_ros.Buffer()
+    # listener = tf2_ros.TransformListener(tfBuffer)
+    # print("waiting for tf")
+    # rospy.sleep(0.1)
+    # camera_to_base = utils.compute_se3(tfBuffer, "base_link", "head_rgbd_sensor_link")
+    # print("camera_to_base: ", camera_to_base)
+    # current_lift = whole_body.joint_state.position[1]
+    # print ("Camera height: ", camera_to_base[2, 3])
+    # lift_goal = min(0.65, surface_height - 0.1)
+    # camera_height_goal = lift_goal - current_lift + camera_to_base[2, 3]
+    # tilt = - np.arctan2(camera_height_goal - surface_height - 0.1, surface_depth/4 + approach_dist)
+    # tilt = min(tilt, 25 * np.pi / 180) # joint limit
+
+    # config = {
+    #     'arm_lift_joint': lift_goal,
+    #     'arm_flex_joint': -np.pi / 6,
+    #     'arm_roll_joint': 0.0,
+    #     'wrist_flex_joint': -1.57,
+    #     'wrist_roll_joint': 0.0,
+    #     'head_tilt_joint': tilt,
+    #     'head_pan_joint': 0.0
+    # }
+    # whole_body.move_to_joint_positions(config)
+    # print("tilt done")
+
+    # Scan the table
+    # start_client = rospy.ServiceProxy("/scene_graph/start_scan", StartScan)
+    # rospy.wait_for_service('/scene_graph/start_scan')
+    # response = start_client(StartScanRequest(table_name))
+    # if not response.success:
+    #     print("Scan failed")
+
+    # finish_client = rospy.ServiceProxy("/scene_graph/finish_scan", FinishScan)    
+    # rospy.wait_for_service('/scene_graph/finish_scan')
+    # req = FinishScanRequest()
+    # req.request_point_cloud = True
+    # req.request_feature = False
+    # response = finish_client(req)
+    # print ([obj.label for obj in response.objects])
+    # print("Scan finished")
+
+
+if __name__ == '__main__':
+    main()
