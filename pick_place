@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+
+import rospy
+import moveit_commander
+import actionlib
+import numpy as np
+from tf import transformations as T
+
+from pddlstream.algorithms.meta import solve
+from pddlstream.utils import read
+from pddlstream.language.generator import from_fn
+from pddlstream.language.constants import PDDLProblem
+
+from primitives import Conf, Pose
+from stream import get_arm_motion_gen, get_grasp_gen, get_ik_fn, get_base_motion_gen
+from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
+from geometry_msgs.msg import PoseStamped
+from control_msgs.msg import GripperCommandAction, GripperCommandGoal
+from gazebo_msgs.srv import GetModelState
+import hsrb_interface
+
+GRASP_FORCE = 0.2
+HAND_TF = "hand_palm_link"
+
+
+
+
+class GripperController:
+    def __init__(self):
+        self.effort_client = actionlib.SimpleActionClient('/hsrb/gripper_controller/grasp', GripperApplyEffortAction)
+        self.position_client = actionlib.SimpleActionClient('/hsrb/gripper_controller/command', GripperCommandAction)
+
+        self.effort_client.wait_for_server(timeout=rospy.Duration(10))
+        self.position_client.wait_for_server(timeout=rospy.Duration(10))
+    
+    def grasp_object(self, effort=0.8):
+        self.open_gripper()
+        rospy.sleep(1.0) # wait for gripper to open
+
+        goal = GripperApplyEffortGoal()
+        goal.effort = -effort
+        self.effort_client.send_goal(goal)
+        self.effort_client.wait_for_result(timeout=rospy.Duration(10))
+
+        if self.effort_client.get_result():
+            rospy.loginfo("Object grasped")
+        else:
+            rospy.loginfo("Failed to grasp")
+
+    def open_gripper(self):
+        goal = GripperCommandGoal()
+        goal.command.position = 1
+        goal.command.max_effort = 0.8
+        self.position_client.send_goal(goal)
+        self.position_client.wait_for_result(timeout=rospy.Duration(10))
+        breakpoint()
+        if self.position_client.get_result():
+            rospy.loginfo("Gripper opened")
+        else:
+            rospy.loginfo("Failed to open gripper")
+
+
+
+def add_object(scene, object_name):
+    rospy.wait_for_service("/gazebo/get_model_state")
+    get_state = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
+    state = get_state(object_name, "")
+
+    pose = state.pose
+    pose.position.z = pose.position.z + 0.105
+    pose_stamped = PoseStamped()
+    pose_stamped.header.frame_id = "map"
+    pose_stamped.pose = pose
+
+    scene.add_box(object_name, pose_stamped, (0.16, 0.06, 0.21))
+    rospy.sleep(1.0)
+
+def main():
+    rospy.init_node("tamp")
+    hsrb_robot = hsrb_interface.Robot()
+    hsrb_gripper = hsrb_robot.get('gripper')
+    hsrb_whole_body = hsrb_robot.get('whole_body')
+    while not rospy.is_shutdown():
+        try:
+            arm_group = moveit_commander.MoveGroupCommander("arm", wait_for_servers=0.0)
+            whole_body = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+            arm_group.set_pose_reference_frame("base_link")
+            whole_body.set_pose_reference_frame("map")
+            robot = moveit_commander.RobotCommander()
+            scene = moveit_commander.PlanningSceneInterface()
+            break
+        except RuntimeError as e:
+            print("Failed to launch, retrying ", e)
+            rospy.sleep(1.0)
+
+    # Create problem instance and robot command interface
+    robot = arm_group  # This represents our robot interface
+
+    arm_joints = [
+        "arm_lift_joint",
+        "arm_flex_joint",
+        "arm_roll_joint",
+        "wrist_flex_joint",
+        "wrist_roll_joint",
+        "wrist_ft_sensor_frame_joint",
+    ]
+    base_joint = "world_joint"
+
+    # Get current arm configuration for start
+    current_joints = arm_group.get_current_joint_values()
+    start_arm_conf = Conf(arm_group, arm_joints, current_joints)
+
+    start_base_values = [0,0,0]
+    start_base_conf = Conf(whole_body, [base_joint], start_base_values)
+
+    object_name = "ycb_003_cracker_box"
+    add_object(scene, object_name)
+    if object_name in scene.get_known_object_names():
+        object_pose_dict = scene.get_object_poses([object_name])
+        object_pose = Pose()
+        object_pose.position = object_pose_dict[object_name].position
+        object_pose.orientation = object_pose_dict[object_name].orientation
+    else:
+        rospy.loginfo("Object not found in scene")
+        return
+
+    arm_motion_gen = get_arm_motion_gen(arm_group)
+    base_motion_gen = get_base_motion_gen(whole_body)
+    grasp_gen = get_grasp_gen(whole_body)
+    ik_fn = get_ik_fn(whole_body)
+
+    domain_pddl = read(
+        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_domain.pddl"
+    )
+    stream_pddl = read(
+        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_stream.pddl"
+    )
+
+    init = [
+        # Arm
+        ("Arm", "arm"),
+        ("ArmConf", start_arm_conf),
+        ("AtArmConf", "arm", start_arm_conf),
+        ("HandEmpty",),
+
+        # Base
+        ("BConf", start_base_conf),
+        ("AtBConf", start_base_conf),
+
+        # Object
+        ("Object", object_name),
+        ("Pose", object_name, object_pose),
+        ("AtPose", object_name, object_pose),
+        ("Graspable", object_name),
+    ]
+    goal = ("Holding", object_name)
+
+    stream_map = {
+        "plan-base-motion": from_fn(base_motion_gen),
+        "plan-arm-motion": from_fn(arm_motion_gen),
+        "sample-grasp": from_fn(grasp_gen),
+        "inverse-kinematics": from_fn(ik_fn),
+    }
+
+    # Create and solve problem
+    pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
+    solution = solve(pddl_problem)
+    if solution is None:
+        rospy.loginfo("No solution found")
+        return
+
+    # Execute the solution
+    plan, cost, evaluations = solution
+    if plan is None:
+        rospy.loginfo("Failed to find a plan")
+        return
+    
+    rospy.loginfo("Executing the plan: %s", plan)
+    for i, (name, args) in enumerate(plan):
+        rospy.loginfo("Step %d: %s %s", i, name, args)
+
+        if name == "move_arm":
+            a, q1, t, q2 = args
+
+            trajectory = t.commands[0]
+            if trajectory.moveit_plan is not None:
+                robot.execute(trajectory.moveit_plan)
+            else:
+                # Set initial target
+                joint_values = [
+                    q1.values[0],  # x
+                    q1.values[1],  # y
+                    q1.values[2],  # theta
+                ]
+                robot.set_joint_value_target("world_joint", joint_values)
+                success = robot.go(wait=True)
+                if not success:
+                    rospy.logwarn("Failed to execute the plan")
+                    return
+        elif name == "pick":
+            _, obj, pose, grasp, q, bq = args
+            try:
+                # try using hsrb interface
+                hsrb_gripper.command(1.0)
+                rospy.sleep(1.0)
+                hsrb_gripper.apply_force(GRASP_FORCE)
+                rospy.sleep(2.0)
+            except Exception as e:
+                rospy.logwarn("Failed to grasp the object using hsrb interface")
+                gripper = GripperController()
+        
+        elif name == "move_base":
+            q1, t, q2 = args
+            # Set final target
+            trajectory = t.commands[0]
+            if trajectory.moveit_plan is not None:
+                robot.execute(trajectory.moveit_plan)
+            else:
+                joint_values = [
+                    q2.values[0],  # x
+                    q2.values[1],  # y
+                    q2.values[2],  # theta
+                ]
+                robot.set_joint_value_target("world_joint", joint_values)
+                success = robot.go(wait=True)
+                if not success:
+                    rospy.logwarn("Failed to execute the plan")
+                    return
+    
+        else:
+            import pdb; pdb.set_trace()
+
+
+if __name__ == "__main__":
+    main()
