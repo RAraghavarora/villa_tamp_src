@@ -15,10 +15,11 @@ class Pose(object):
         self.orientation = geometry_msgs.msg.Quaternion()
 
 class Conf(object):
-    def __init__(self, robot, joints, values):
+    def __init__(self, robot, joints, values, moveit_plan=None):
         self.robot = robot
         self.joints = joints
         self.values = values
+        self.moveit_plan = moveit_plan
 
     def assign(self):
         robot_state = RobotState()
