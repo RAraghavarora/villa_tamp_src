@@ -1,18 +1,12 @@
 import geometry_msgs.msg
 from moveit_commander import RobotState
+import copy
+
 
 class Command(object):
     def __init__(self):
         self.commands = []
 
-class State(object):
-    def __init__(self):
-        pass
-
-class Pose(object):
-    def __init__(self):
-        self.position = geometry_msgs.msg.Point()
-        self.orientation = geometry_msgs.msg.Quaternion()
 
 class Conf(object):
     def __init__(self, robot, joints, values, moveit_plan=None):
@@ -27,19 +21,39 @@ class Conf(object):
         robot_state.joint_state.position = self.values
         return robot_state
 
+
 class Trajectory(Command):
     def __init__(self, path, moveit_plan=None):
         super(Trajectory, self).__init__()
         self.path = path
         self.moveit_plan = moveit_plan
 
-class Commands(Command):
+class Commands(object):
     def __init__(self, state, savers=None, commands=None):
-        super(Commands, self).__init__()
+        # super(Commands, self).__init__()
         self.state = state
-        self.savers = savers or []
-        self.commands = commands or []
+        self.savers = tuple(savers)
+        self.commands = tuple(commands)
 
-class Problem(object):
-    def __init__(self, robot):
-        self.robot = robot
+    def assign(self):
+        for saver in self.savers:
+            saver.restore()
+        return copy.copy(self.state)
+
+    def apply(self, state, **kwargs):
+        for command in self.commands:
+            for result in command.apply(state, **kwargs):
+                yield result
+
+    def __repr__(self):
+        return "c{}".format(id(self) % 1000)
+
+class State(object):
+    def __init__(self, attachments={}, cleaned=set(), cooked=set()):
+        pass
+
+class PoseStamped(geometry_msgs.msg.PoseStamped):
+    def __init__(self):
+        super(PoseStamped, self).__init__()
+        self.moveit_grasp = None
+        self.header.frame_id = "map"

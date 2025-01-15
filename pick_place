@@ -1,63 +1,27 @@
 #!/usr/bin/env python3
-
+from sensor_msgs.msg import JointState
+import time
 import rospy
 import moveit_commander
 import actionlib
 import numpy as np
 from tf import transformations as T
 
-from pddlstream.algorithms.meta import solve
-from pddlstream.utils import read
-from pddlstream.language.generator import from_fn, from_list_fn, from_gen_fn
-from pddlstream.language.constants import PDDLProblem
+from pddlstream.algorithms.meta import solve # type: ignore
+from pddlstream.utils import read # type: ignore
+from pddlstream.language.generator import from_fn, from_list_fn, from_gen_fn # type: ignore
+from pddlstream.language.constants import PDDLProblem # type: ignore
 
-from primitives import Conf, Pose
+from primitives import Conf
 from stream import get_arm_motion_gen, get_grasp_gen, get_ik_fn, get_base_motion_gen
 from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Pose
 from control_msgs.msg import GripperCommandAction, GripperCommandGoal
 from gazebo_msgs.srv import GetModelState
 import hsrb_interface
 
 GRASP_FORCE = 0.2
 HAND_TF = "hand_palm_link"
-
-
-
-
-class GripperController:
-    def __init__(self):
-        self.effort_client = actionlib.SimpleActionClient('/hsrb/gripper_controller/grasp', GripperApplyEffortAction)
-        self.position_client = actionlib.SimpleActionClient('/hsrb/gripper_controller/command', GripperCommandAction)
-
-        self.effort_client.wait_for_server(timeout=rospy.Duration(10))
-        self.position_client.wait_for_server(timeout=rospy.Duration(10))
-    
-    def grasp_object(self, effort=0.8):
-        self.open_gripper()
-        rospy.sleep(1.0) # wait for gripper to open
-
-        goal = GripperApplyEffortGoal()
-        goal.effort = -effort
-        self.effort_client.send_goal(goal)
-        self.effort_client.wait_for_result(timeout=rospy.Duration(10))
-
-        if self.effort_client.get_result():
-            rospy.loginfo("Object grasped")
-        else:
-            rospy.loginfo("Failed to grasp")
-
-    def open_gripper(self):
-        goal = GripperCommandGoal()
-        goal.command.position = 1
-        goal.command.max_effort = 0.8
-        self.position_client.send_goal(goal)
-        self.position_client.wait_for_result(timeout=rospy.Duration(10))
-        breakpoint()
-        if self.position_client.get_result():
-            rospy.loginfo("Gripper opened")
-        else:
-            rospy.loginfo("Failed to open gripper")
 
 
 
@@ -96,28 +60,60 @@ def add_object(scene, object_name):
     scene.add_box(object_name, pose_stamped, dimensions)
     rospy.sleep(1.0)
 
+
+
+def init_robot_state():
+    # Create publisher for joint states
+    joint_state_pub = rospy.Publisher('/hsrb/joint_states', JointState, queue_size=10)
+    
+    # Create initial joint state message
+    joint_state = JointState()
+    joint_state.name = [
+        'wrist_ft_sensor_frame_joint',
+        'base_b_bumper_joint',
+        'base_f_bumper_joint',
+        'base_l_passive_wheel_x_frame_joint',
+        'base_l_passive_wheel_y_frame_joint',
+        'base_l_passive_wheel_z_joint',
+        'base_r_passive_wheel_x_frame_joint',
+        'base_r_passive_wheel_y_frame_joint',
+        'base_r_passive_wheel_z_joint'
+    ]
+    joint_state.position = [0.0] * len(joint_state.name)
+    
+    # Publish a few times to ensure state is received
+    rate = rospy.Rate(10)
+    for _ in range(10):
+        joint_state.header.stamp = rospy.Time.now()
+        joint_state_pub.publish(joint_state)
+        rate.sleep()
+
 def main():
     rospy.init_node("tamp")
     hsrb_robot = hsrb_interface.Robot()
     hsrb_gripper = hsrb_robot.get('gripper')
     hsrb_whole_body = hsrb_robot.get('whole_body')
+    # init_robot_state()
     while not rospy.is_shutdown():
         try:
             arm_group = moveit_commander.MoveGroupCommander("arm", wait_for_servers=0.0)
             whole_body = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
-            base_group = moveit_commander.MoveGroupCommander("base", wait_for_servers=0.0)
+            # base_group = moveit_commander.MoveGroupCommander("base", wait_for_servers=0.0)
             arm_group.set_pose_reference_frame("base_link")
             whole_body.set_pose_reference_frame("map")
-            base_group.set_pose_reference_frame("map")
-            robot = moveit_commander.RobotCommander()
+            # base_group.set_pose_reference_frame("map")
             scene = moveit_commander.PlanningSceneInterface()
+
+            whole_body.allow_replanning(True)
+            whole_body.set_planning_time(5)
+            end_effector = whole_body.get_end_effector_link()
+            
             break
         except RuntimeError as e:
             print("Failed to launch, retrying ", e)
             rospy.sleep(1.0)
 
     # Create problem instance and robot command interface
-    robot = arm_group  # This represents our robot interface
 
     arm_joints = [
         "arm_lift_joint",
@@ -191,6 +187,9 @@ def main():
         "inverse-kinematics": from_gen_fn(ik_fn),
     }
 
+    whole_body.allow_replanning(True)
+    whole_body.set_planning_time(10)
+    whole_body.set_support_surface_name("kitchen_table")
     # Create and solve problem
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
     solution = solve(pddl_problem)
@@ -249,8 +248,18 @@ def main():
 
         elif name == "pick":
             _, obj, pose, grasp, q, bq = args
-            # if hasattr(bq, 'moveit_plan') and bq.moveit_plan is not None:
-            #     whole_body.execute(bq.moveit_plan)
+            import moveit_msgs.msg
+            n_attempts = 0
+            result=None
+            # while (result != moveit_msgs.msg.MoveItErrorCodes.SUCCESS) and (n_attempts < 20):
+            #     n_attempts += 1
+            #     rospy.loginfo("Pick attempt: " + str(n_attempts))
+            #     result = whole_body.pick(obj, [grasp.moveit_grasp])
+            #     rospy.sleep(0.2)
+            if hasattr(bq, 'moveit_plan') and bq.moveit_plan is not None:
+                rospy.loginfo("Executing move base plan of the pick action")
+                whole_body.execute(bq.moveit_plan)
+                rospy.sleep(0.5)
             # else:
             #     joint_values = [
             #         bq.values[0],  # x
@@ -263,15 +272,9 @@ def main():
             #         rospy.logwarn("Failed to move base for pick")
             #         return
             if hasattr(q, 'moveit_plan') and q.moveit_plan is not None:
-                rospy.loginfo("Executing move arm plan")
+                rospy.loginfo("Executing move arm plan of the pick action")
                 whole_body.execute(q.moveit_plan)
-            else:
-                for joint, value in zip(arm_joints, q.values):
-                    whole_body.set_joint_value_target(joint, value)
-                success = whole_body.go(wait=True)
-                if not success:
-                    rospy.logwarn("Failed to move arm for pick")
-                    return
+                rospy.sleep(0.5)
             
             # try:
             #     # try using hsrb interface
