@@ -1,12 +1,14 @@
+import rospy
+import tf2_ros
+import tf2_geometry_msgs # Crucial to import
+import trajectory_msgs
+import numpy as np
 from moveit_msgs.msg import GripperTranslation
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-import rospy
-import trajectory_msgs
 from moveit_commander.exception import MoveItCommanderException
 from tf import transformations as T
 from geometry_msgs.msg import PoseStamped
 from primitives import Conf
-import numpy as np
 from tf.transformations import quaternion_from_euler, quaternion_multiply
 
 def make_gripper_posture(pos, effort=0.0):
@@ -117,3 +119,22 @@ def make_pose(x, y, z, roll, pitch, yaw, reference_frame="map", init=(0.707, 0.0
     pose.pose.position.y = y
     pose.pose.position.z = z
     return pose
+
+def odom_to_map(object_pose):
+    try:
+        object_pose_stamped = PoseStamped()
+        object_pose_stamped.header.frame_id = "odom"
+        object_pose_stamped.header.stamp = rospy.Time(0)
+        object_pose_stamped.pose = object_pose
+
+        tf2_buffer = tf2_ros.Buffer()
+        tf2_listener = tf2_ros.TransformListener(tf2_buffer)
+
+        tf2_buffer.can_transform('map', 'odom', rospy.Time(0), rospy.Duration(5.0))
+        object_pose_map = tf2_buffer.transform(object_pose_stamped, "map", rospy.Duration(5.0))
+        return object_pose_map
+
+    except (tf2_ros.LookupException, 
+            tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException) as e:
+        rospy.logwarn(f"Failed to transform pose from odom to map: {e}")

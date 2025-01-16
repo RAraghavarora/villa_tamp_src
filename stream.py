@@ -14,12 +14,14 @@ from utils import (
     make_gripper_translation,
     pose_to_matrix,
     matrix_to_pose,
-    make_pose
+    make_pose,
+    odom_to_map
 )
 from sensor_msgs.msg import JointState
 
-def get_base_motion_gen(move_group, custom_limits={}, collisions=True):
+def get_base_motion_gen(move_group, robot_state):
     def fn(bq1, bq2):
+        move_group.set_start_state(robot_state)
         # Set joint target for base motion
         joint_values = [
             bq2.values[0],  # x
@@ -44,7 +46,7 @@ def get_base_motion_gen(move_group, custom_limits={}, collisions=True):
     return fn
 
 
-def get_arm_motion_gen(move_group, custom_limits={}, collisions=True):
+def get_arm_motion_gen(move_group, robot_state):
     """Generate arm motions for HSR using MoveIt"""
     # HSR arm joints: 'arm_lift_joint', 'arm_flex_joint', 'arm_roll_joint', 
     #                 'wrist_flex_joint', 'wrist_roll_joint'
@@ -58,6 +60,7 @@ def get_arm_motion_gen(move_group, custom_limits={}, collisions=True):
     ]
 
     def fn(arm, aq1, aq2):
+        move_group.set_start_state(robot_state)
         # Set joint targets for arm motion
         joint_values = dict(zip(arm_joints, aq2.values))
 
@@ -84,12 +87,14 @@ def get_arm_motion_gen(move_group, custom_limits={}, collisions=True):
     return fn
 
 
-def get_grasp_gen(whole_body, scene):
+def get_grasp_gen(whole_body, scene, robot_state):
     def gen(obj):
+        whole_body.set_start_state(robot_state)
         width, length, height = (0.06, 0.16, 0.21) if obj == 'ycb_003_cracker_box' else (0.1, 0.1, 0.1)
 
         grasps = []
-        object_pose = scene.get_object_poses([obj])[obj]
+        object_pose = scene.get_object_poses([obj])[obj] # scene returns in odom frame because planning_frame is odom. Idk how to change that.
+
         init_quat = (0.707, 0.0, 0.707, 0.0)  # copied from moveit_pick_and_place_demo.py 
 
         for angle in [0, np.pi/2, np.pi, -np.pi/2]:
@@ -110,16 +115,17 @@ def get_grasp_gen(whole_body, scene):
             moveit_grasp.pre_grasp_approach = make_gripper_translation(0.05, 0.1, [0,0,1])
             moveit_grasp.post_grasp_retreat = make_gripper_translation(0.05, 0.1, [0,0,1], "base_footprint")
             init = T.quaternion_multiply(init_quat, quat)
-            moveit_grasp.grasp_pose = make_pose(
-                offset * np.cos(angle),
-                offset * np.sin(angle),
-                height / 2,
-                0,
-                0,
-                angle,
-                reference_frame="odom",
-                init=init,
-            )
+            # moveit_grasp.grasp_pose = make_pose(
+            #     offset * np.cos(angle),
+            #     offset * np.sin(angle),
+            #     height / 2,
+            #     0,
+            #     0,
+            #     angle,
+            #     reference_frame="odom",
+            #     init=init,
+            # )
+            moveit_grasp.grasp_pose = side_grasp
 
             moveit_grasp.grasp_pose = side_grasp
             moveit_grasp.allowed_touch_objects = [obj]
@@ -224,12 +230,12 @@ def get_grasp_gen(whole_body, scene):
 
     return gen
 
-def get_ik_fn(whole_body, arm_group):
+def get_ik_fn(whole_body, arm_group, robot_state):
     # This generates correct arm conf, but very wrong base conf
     move_group = whole_body
     HAND_TF = "hand_palm_link"
     DESIRED_DISTANCE = 0.5
-    POSITION_TOLERANCE = 5
+    POSITION_TOLERANCE = 0.5
     def verify_end_effector_position(group, target_pose, base_values, arm_values):
         try:
             # First move the base to planned position
@@ -261,17 +267,20 @@ def get_ik_fn(whole_body, arm_group):
         # grasp_pose will be relative to the object
         grasp = grasp.pose
         try:
-            rospy.loginfo(f"Object Pose: {obj_pose}")
+            rospy.loginfo(f"Object Pose (in odom): {obj_pose}")
+            object_pose_map = odom_to_map(obj_pose).pose
+            rospy.loginfo(f"Object Pose (in map): {object_pose_map}")
             rospy.loginfo(f"Grasp Pose (in object frame): {grasp}")
-            robot_state = moveit_commander.RobotState()
-            joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
-            robot_state.joint_state = joint_state
             move_group.set_start_state(robot_state)
             rospy.loginfo("Set start state for planning")
             
             
-            obj_matrix = pose_to_matrix(obj_pose)
+            obj_matrix = pose_to_matrix(object_pose_map)
             grasp_matrix = pose_to_matrix(grasp)
+
+            correction_matrix = T.euler_matrix(0, -np.pi/2, 0) # ;; added now
+            corrected_grasp_matrix = np.dot(grasp_matrix, correction_matrix) # ;; added now
+            corrected_world_grasp_pose = matrix_to_pose(corrected_grasp_matrix) # ;; added now
 
             world_grasp_matrix = np.dot(obj_matrix, grasp_matrix) # grasp_pose -> world
             world_grasp_pose = matrix_to_pose(world_grasp_matrix)
@@ -279,33 +288,34 @@ def get_ik_fn(whole_body, arm_group):
 
             target_pose = PoseStamped()
             target_pose.header.frame_id = 'map' # Since obj_pose is now in world frame
+            # target_pose.pose = corrected_world_grasp_pose
             target_pose.pose = world_grasp_pose
 
-            angle_to_obj = np.arctan2(world_grasp_pose.position.y, world_grasp_pose.position.x)
-            base_x = world_grasp_pose.position.x - DESIRED_DISTANCE*np.cos(angle_to_obj)
-            base_y = world_grasp_pose.position.y - DESIRED_DISTANCE*np.sin(angle_to_obj)
-            base_theta = angle_to_obj
+
+            # angle_to_obj = np.arctan2(world_grasp_pose.position.y, world_grasp_pose.position.x)
+            # base_x = world_grasp_pose.position.x - DESIRED_DISTANCE*np.cos(angle_to_obj)
+            # base_y = world_grasp_pose.position.y - DESIRED_DISTANCE*np.sin(angle_to_obj)
+            # base_theta = angle_to_obj
           
-            whole_body.set_joint_value_target("world_joint", [base_x, base_y, base_theta])
+            # whole_body.set_joint_value_target("world_joint", [base_x, base_y, base_theta])
+            whole_body.set_pose_target(target_pose) # target for EE
             whole_body.allow_replanning(True)
             base_plan = whole_body.plan()
-            breakpoint()
             if base_plan[0]:
-                whole_body.set_pose_target(target_pose, HAND_TF) # target for EE
-                arm_plan = arm_group.plan()
-                if arm_plan[0]:
-                    rospy.loginfo("Found a valid IK plan, verifying end effector position...")
-                    arm_joint_values = [arm_plan[1].joint_trajectory.points[-1].positions[i] for i in range(6)] # 6 joints in arm
-                    base_joint_values = whole_body.get_current_joint_values()[:3] # x,y,theta
+                # arm_plan = arm_group.plan()
+                # if arm_plan[0]:
+                rospy.loginfo("Found a valid IK plan, verifying end effector position...")
+                arm_joint_values = [base_plan[1].joint_trajectory.points[-1].positions[i] for i in range(6)] # 6 joints in arm
+                base_joint_values = whole_body.get_current_joint_values()[:3] # x,y,theta
+                rospy.loginfo("End effector position verified!")
+                arm_conf = Conf(arm_group, arm_group.get_active_joints(), arm_joint_values, moveit_plan=base_plan[1])
+                base_conf = Conf(whole_body, ["world_joint"], base_joint_values)
+                yield (arm_conf, base_conf)
                     
-                    if verify_end_effector_position(whole_body, target_pose, base_joint_values, arm_joint_values):
-                        rospy.loginfo("End effector position verified!")
-                        arm_conf = Conf(arm_group, arm_group.get_active_joints(), arm_joint_values, moveit_plan=arm_plan[1])
-                        base_conf = Conf(whole_body, ["world_joint"], base_joint_values, moveit_plan=base_plan[1])
-                        yield (arm_conf, base_conf)
-                        return None
-                    else:
-                        rospy.logwarn("End effector would not reach target position, trying another solution...")
+                    # if verify_end_effector_position(whole_body, target_pose, base_joint_values, arm_joint_values):
+                    #     return None
+                    # else:
+                    #     rospy.logwarn("End effector would not reach target position, trying another solution...")
 
                     
                     # rospy.loginfo(f"Arm Joint Values: {arm_joint_values}")
@@ -313,9 +323,9 @@ def get_ik_fn(whole_body, arm_group):
                     # arm_conf = Conf(arm_group, arm_group.get_active_joints(), arm_joint_values, moveit_plan=arm_plan[1])
                     # base_conf = Conf(whole_body, ["world_joint"], base_joint_values, moveit_plan=base_plan[1])
                     # yield (arm_conf, base_conf)
-                else:
-                    rospy.logwarn("Failed to find IK plan for arm")
-                    return None
+                # else:
+                #     rospy.logwarn("Failed to find IK plan for arm")
+                #     return None
             else:
                 rospy.logwarn("Failed to find IK plan for base")
                 return None

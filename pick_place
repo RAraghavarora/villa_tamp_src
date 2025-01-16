@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import tf2_ros
+import tf2_geometry_msgs # Crucial to import
 from sensor_msgs.msg import JointState
 import time
 import rospy
@@ -35,6 +37,7 @@ def add_object(scene, object_name):
     
     pose_stamped = PoseStamped()
     pose_stamped.header.frame_id = "map"
+    pose_stamped.header.stamp = rospy.Time.now()
     pose_stamped.pose = pose
 
     if object_name == "ycb_003_cracker_box":
@@ -105,13 +108,19 @@ def main():
             scene = moveit_commander.PlanningSceneInterface()
 
             whole_body.allow_replanning(True)
-            whole_body.set_planning_time(5)
+            whole_body.set_planning_time(10)
+            whole_body.set_max_velocity_scaling_factor(0.7)
             end_effector = whole_body.get_end_effector_link()
             
             break
         except RuntimeError as e:
             print("Failed to launch, retrying ", e)
             rospy.sleep(1.0)
+
+    robot_state = moveit_commander.RobotState()
+    joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
+    robot_state.joint_state = joint_state
+    whole_body.set_start_state(robot_state)
 
     # Create problem instance and robot command interface
 
@@ -144,10 +153,10 @@ def main():
         rospy.loginfo("Object not found in scene")
         return
 
-    base_motion_gen = get_base_motion_gen(whole_body)
-    arm_motion_gen = get_arm_motion_gen(arm_group)
-    grasp_gen = get_grasp_gen(whole_body, scene)
-    ik_fn = get_ik_fn(whole_body, arm_group)
+    base_motion_gen = get_base_motion_gen(whole_body, robot_state)
+    arm_motion_gen = get_arm_motion_gen(whole_body, robot_state)
+    grasp_gen = get_grasp_gen(whole_body, scene, robot_state)
+    ik_fn = get_ik_fn(whole_body, arm_group, robot_state)
 
     domain_pddl = read(
         "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_domain.pddl"
@@ -187,8 +196,6 @@ def main():
         "inverse-kinematics": from_gen_fn(ik_fn),
     }
 
-    whole_body.allow_replanning(True)
-    whole_body.set_planning_time(10)
     whole_body.set_support_surface_name("kitchen_table")
     # Create and solve problem
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
@@ -254,7 +261,7 @@ def main():
             # while (result != moveit_msgs.msg.MoveItErrorCodes.SUCCESS) and (n_attempts < 20):
             #     n_attempts += 1
             #     rospy.loginfo("Pick attempt: " + str(n_attempts))
-            #     result = whole_body.pick(obj, [grasp.moveit_grasp])
+            #     result = whole_body.pick(obj, grasp.moveit_grasp)
             #     rospy.sleep(0.2)
             if hasattr(bq, 'moveit_plan') and bq.moveit_plan is not None:
                 rospy.loginfo("Executing move base plan of the pick action")
