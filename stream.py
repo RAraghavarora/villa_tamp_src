@@ -1,5 +1,6 @@
 import random
 import moveit_commander
+import copy
 from primitives import Trajectory, Commands, Conf, State
 from primitives import PoseStamped as OurPoseStamped
 from geometry_msgs.msg import PoseStamped, Point, Quaternion, Pose
@@ -18,6 +19,7 @@ from utils import (
     odom_to_map
 )
 from sensor_msgs.msg import JointState
+GRASPS = list()
 
 def get_base_motion_gen(move_group, robot_state):
     def fn(bq1, bq2):
@@ -98,7 +100,7 @@ def get_grasp_gen(whole_body, scene, robot_state):
         init_quat = (0.707, 0.0, 0.707, 0.0)  # copied from moveit_pick_and_place_demo.py 
 
         for angle in [0, np.pi/2, np.pi, -np.pi/2]:
-            side_grasp = OurPoseStamped()
+            side_grasp = PoseStamped()
             offset = width/2 + 0.1
             side_grasp.pose.position = Point(
                 offset * np.cos(angle),
@@ -125,13 +127,18 @@ def get_grasp_gen(whole_body, scene, robot_state):
             #     reference_frame="odom",
             #     init=init,
             # )
-            moveit_grasp.grasp_pose = side_grasp
+            grasp_pose_ee = convert_obj_frame_to_ee(object_pose, side_grasp.pose)
+            # side_grasp.pose = grasp_pose_ee
+            moveit_grasp.grasp_pose = copy.deepcopy(side_grasp)
+            moveit_grasp.grasp_pose.pose = grasp_pose_ee
+            GRASPS.append(moveit_grasp)
+            # moveit_grasp.grasp_pose = side_grasp
 
-            moveit_grasp.grasp_pose = side_grasp
+            # moveit_grasp.grasp_pose = side_grasp
             moveit_grasp.allowed_touch_objects = [obj]
             moveit_grasp.max_contact_force = 0.5
 
-            side_grasp.moveit_grasp = moveit_grasp
+            # side_grasp.moveit_grasp = moveit_grasp
             grasps.append((side_grasp, moveit_grasp))
 
         return [(g[0],) for g in grasps] # For PDDLStream, return only the Poses
@@ -230,12 +237,35 @@ def get_grasp_gen(whole_body, scene, robot_state):
 
     return gen
 
+
+def convert_obj_frame_to_ee(obj_pose, grasp_pose):
+    hand_correction = np.array([
+        [1, 0,  0, 0],
+        [0, 0, -1, 0],
+        [0, 1,  0, 0],
+        [0, 0,  0, 1]
+    ])
+    obj_pose_map = odom_to_map(obj_pose).pose
+    obj_matrix = pose_to_matrix(obj_pose_map)
+    grasp_matrix = pose_to_matrix(grasp_pose)
+    world_grasp_matrix = np.dot(obj_matrix, grasp_matrix) # obj_frame -> map
+    corrected_world_grasp_matrix = np.dot(world_grasp_matrix, hand_correction) # map -> EE?
+    world_grasp_pose = matrix_to_pose(corrected_world_grasp_matrix)
+    return world_grasp_pose
+
+
 def get_ik_fn(whole_body, arm_group, robot_state):
     # This generates correct arm conf, but very wrong base conf
     move_group = whole_body
     HAND_TF = "hand_palm_link"
     DESIRED_DISTANCE = 0.5
     POSITION_TOLERANCE = 0.5
+    hand_correction = np.array([
+        [1, 0,  0, 0],
+        [0, 0, -1, 0],
+        [0, 1,  0, 0],
+        [0, 0,  0, 1]
+    ])
     def verify_end_effector_position(group, target_pose, base_values, arm_values):
         try:
             # First move the base to planned position
@@ -265,25 +295,28 @@ def get_ik_fn(whole_body, arm_group, robot_state):
 
     def fn(arm, obj, obj_pose, grasp):
         # grasp_pose will be relative to the object
-        grasp = grasp.pose
+        grasp_pose = grasp.pose
         try:
             rospy.loginfo(f"Object Pose (in odom): {obj_pose}")
             object_pose_map = odom_to_map(obj_pose).pose
             rospy.loginfo(f"Object Pose (in map): {object_pose_map}")
-            rospy.loginfo(f"Grasp Pose (in object frame): {grasp}")
+            rospy.loginfo(f"Grasp Pose (in object frame): {grasp_pose}")
             move_group.set_start_state(robot_state)
             rospy.loginfo("Set start state for planning")
             
             
             obj_matrix = pose_to_matrix(object_pose_map)
-            grasp_matrix = pose_to_matrix(grasp)
+            grasp_matrix = pose_to_matrix(grasp_pose)
 
-            correction_matrix = T.euler_matrix(0, -np.pi/2, 0) # ;; added now
-            corrected_grasp_matrix = np.dot(grasp_matrix, correction_matrix) # ;; added now
-            corrected_world_grasp_pose = matrix_to_pose(corrected_grasp_matrix) # ;; added now
+            # correction_matrix = T.euler_matrix(0, -np.pi/2, 0) # ;; added now
+            # corrected_grasp_matrix = np.dot(grasp_matrix, correction_matrix) # ;; added now
+            # corrected_world_grasp_pose = matrix_to_pose(corrected_grasp_matrix) # ;; added now
 
-            world_grasp_matrix = np.dot(obj_matrix, grasp_matrix) # grasp_pose -> world
-            world_grasp_pose = matrix_to_pose(world_grasp_matrix)
+            world_grasp_matrix = np.dot(obj_matrix, grasp_matrix) # obj_frame -> map
+            corrected_world_grasp_matrix = np.dot(world_grasp_matrix, hand_correction) # map -> EE?
+            world_grasp_pose = matrix_to_pose(corrected_world_grasp_matrix)
+            world_grasp_pose.position.x += 0.1 # ;; added now
+            # grasp.pose = world_grasp_pose
             rospy.loginfo(f"Grasp Pose (in world frame): {world_grasp_pose}")
 
             target_pose = PoseStamped()

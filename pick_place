@@ -15,7 +15,7 @@ from pddlstream.language.generator import from_fn, from_list_fn, from_gen_fn # t
 from pddlstream.language.constants import PDDLProblem # type: ignore
 
 from primitives import Conf
-from stream import get_arm_motion_gen, get_grasp_gen, get_ik_fn, get_base_motion_gen
+from stream import get_arm_motion_gen, get_grasp_gen, get_ik_fn, get_base_motion_gen, GRASPS
 from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
 from geometry_msgs.msg import PoseStamped, Pose
 from control_msgs.msg import GripperCommandAction, GripperCommandGoal
@@ -26,7 +26,6 @@ GRASP_FORCE = 0.2
 HAND_TF = "hand_palm_link"
 
 
-
 def add_object(scene, object_name):
     rospy.wait_for_service("/gazebo/get_model_state")
     get_state = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
@@ -34,7 +33,7 @@ def add_object(scene, object_name):
 
     pose = state.pose
     pose.position.z = pose.position.z + 0.105
-    
+
     pose_stamped = PoseStamped()
     pose_stamped.header.frame_id = "map"
     pose_stamped.header.stamp = rospy.Time.now()
@@ -56,13 +55,23 @@ def add_object(scene, object_name):
         # pose.orientation.w = rotated_quaternion[3]
         dimensions = (0.06, 0.16, 0.21)
     elif object_name == "kitchen_table":
-        pose.position.z = 0.68
-        dimensions = (0.68, 1.13, 0.04)
+        table_height = 0.68
+        pose_stamped.pose.position.z = table_height / 2
+        dimensions = (0.68, 1.13, table_height)
+        # pose.position.z = 0.68
+        # dimensions = (0.68, 1.13, 0.04)
     else:
         dimensions = (0.1, 0.1, 0.1)
+    # if object_name == 'kitchen_table':
+    #     breakpoint()
+    #     scene.add_mesh(
+    #         object_name,
+    #         pose_stamped,
+    #         "/opt/ros/noetic/share/tmc_gazebo_worlds/models/kitchen_table/model-1_4.sdf",
+    #     )
+    # else:
     scene.add_box(object_name, pose_stamped, dimensions)
     rospy.sleep(1.0)
-
 
 
 def init_robot_state():
@@ -121,6 +130,8 @@ def main():
     joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
     robot_state.joint_state = joint_state
     whole_body.set_start_state(robot_state)
+    get_state = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
+    breakpoint()
 
     # Create problem instance and robot command interface
 
@@ -258,11 +269,16 @@ def main():
             import moveit_msgs.msg
             n_attempts = 0
             result=None
-            # while (result != moveit_msgs.msg.MoveItErrorCodes.SUCCESS) and (n_attempts < 20):
-            #     n_attempts += 1
-            #     rospy.loginfo("Pick attempt: " + str(n_attempts))
-            #     result = whole_body.pick(obj, grasp.moveit_grasp)
-            #     rospy.sleep(0.2)
+            while (result != moveit_msgs.msg.MoveItErrorCodes.SUCCESS) and (n_attempts < 2):
+                n_attempts += 1
+                rospy.loginfo("Pick attempt: " + str(n_attempts))
+                for grasp in GRASPS:
+                    result = whole_body.pick(obj, grasp)
+                    if result == moveit_msgs.msg.MoveItErrorCodes.SUCCESS:
+                        break
+                    else:
+                        print(result)
+                    rospy.sleep(0.2)
             if hasattr(bq, 'moveit_plan') and bq.moveit_plan is not None:
                 rospy.loginfo("Executing move base plan of the pick action")
                 whole_body.execute(bq.moveit_plan)
