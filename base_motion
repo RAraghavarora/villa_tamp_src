@@ -9,7 +9,7 @@ from pddlstream.language.generator import from_fn
 from pddlstream.language.constants import PDDLProblem
 from stream import get_base_motion_gen
 from primitives import Conf
-
+from sensor_msgs.msg import JointState
 
 def main():
     rospy.init_node("tamp")
@@ -30,7 +30,11 @@ def main():
     # Create problem instance and robot command interface
     robot = base  # This represents our robot interface
     rospy.loginfo("robot.get_planning_time(): %s", robot.get_planning_time())
-    motion_gen = get_base_motion_gen(robot)
+    robot_state = moveit_commander.RobotState()
+    joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
+    robot_state.joint_state = joint_state
+    base.set_start_state(robot_state)
+    motion_gen = get_base_motion_gen(robot, robot_state)
 
     domain_pddl = read(
         "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl"

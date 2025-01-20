@@ -12,7 +12,7 @@ from pddlstream.language.constants import PDDLProblem
 
 from primitives import Conf
 from stream import get_arm_motion_gen
-
+from sensor_msgs.msg import JointState
 
 def main():
     rospy.init_node("tamp")
@@ -57,7 +57,11 @@ def main():
         random_val = np.random.uniform(min_val, max_val)
         goal_values.append(random_val)
 
-    motion_gen = get_arm_motion_gen(arm_group)
+    robot_state = moveit_commander.RobotState()
+    joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
+    robot_state.joint_state = joint_state
+    robot.set_start_state(robot_state)
+    motion_gen = get_arm_motion_gen(arm_group, robot_state)
 
     domain_pddl = read(
         "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain_arm.pddl"
