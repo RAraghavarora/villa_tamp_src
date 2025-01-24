@@ -1,6 +1,7 @@
 import random
 import moveit_commander
 import copy
+from visualization_msgs.msg import Marker
 from primitives import Trajectory, Commands, Conf, State
 from primitives import PoseStamped as OurPoseStamped
 from geometry_msgs.msg import PoseStamped, Point, Quaternion, Pose
@@ -19,6 +20,8 @@ from utils import (
     odom_to_map
 )
 from sensor_msgs.msg import JointState
+from utils import compute_grasp_poses
+
 GRASPS = list()
 
 def get_base_motion_gen(move_group, robot_state):
@@ -88,154 +91,186 @@ def get_arm_motion_gen(move_group, robot_state):
 
     return fn
 
-
-def get_grasp_gen(whole_body, scene, robot_state):
+def get_grasp_gen(whole_body, scene, robot_state, hsrb_gripper):
     def gen(obj):
-        whole_body.set_start_state(robot_state)
-        width, length, height = (0.06, 0.16, 0.21) if obj == 'ycb_003_cracker_box' else (0.1, 0.1, 0.1)
+        odom_frame_pose = scene.get_object_poses([obj])[obj]
+        map_frame_pose = odom_to_map(odom_frame_pose).pose
+        # create a marker for the object
+        bbox = Marker()
+        bbox.header.frame_id = "map"
+        bbox.pose.position.x = map_frame_pose.position.x
+        bbox.pose.position.y = map_frame_pose.position.y
+        bbox.pose.position.z = map_frame_pose.position.z
+        bbox.pose.orientation.x = map_frame_pose.orientation.x
+        bbox.pose.orientation.y = map_frame_pose.orientation.y
+        bbox.pose.orientation.z = map_frame_pose.orientation.z
+        bbox.pose.orientation.w = map_frame_pose.orientation.w
+        bbox.scale.x = 0.06
+        bbox.scale.y = 0.16
+        bbox.scale.z = 0.21
+        grasps = compute_grasp_poses(bbox, top=False, side=True, relative=False, side_up=False, rigid=True, off_center=False,
+                                    pre_grasp=0.05)
+        
+        for grasp in grasps:
+            whole_body.set_pose_target(grasp)
+            plan = whole_body.plan()
+            if plan[0]:
+                hsrb_gripper.command(1.0)
+                whole_body.execute(plan[1])
+                hsrb_gripper.apply_force(0.15)
+                break
+        
+        breakpoint()
+        whole_body.pick(obj, grasps[0])
+        return [(g,) for g in grasps]
 
-        grasps = []
-        object_pose = scene.get_object_poses([obj])[obj] # scene returns in odom frame because planning_frame is odom. Idk how to change that.
-
-        init_quat = (0.707, 0.0, 0.707, 0.0)  # copied from moveit_pick_and_place_demo.py 
-
-        for angle in [0, np.pi/2, np.pi, -np.pi/2]:
-            side_grasp = PoseStamped()
-            offset = width/2 + 0.1
-            side_grasp.pose.position = Point(
-                offset * np.cos(angle),
-                offset * np.sin(angle),
-                height/2
-            )
-            quat = T.quaternion_from_euler(0, 0, angle)
-            side_grasp.pose.orientation = Quaternion(*quat)
-
-            moveit_grasp = Grasp()
-            moveit_grasp.id = f"grasp_{len(grasps)}"
-            moveit_grasp.pre_grasp_posture = make_gripper_posture(0.8) # Open gripper
-            moveit_grasp.grasp_posture = make_gripper_posture(0.2, -0.02) # Close gripper
-            moveit_grasp.pre_grasp_approach = make_gripper_translation(0.05, 0.1, [0,0,1])
-            moveit_grasp.post_grasp_retreat = make_gripper_translation(0.05, 0.1, [0,0,1], "base_footprint")
-            init = T.quaternion_multiply(init_quat, quat)
-            # moveit_grasp.grasp_pose = make_pose(
-            #     offset * np.cos(angle),
-            #     offset * np.sin(angle),
-            #     height / 2,
-            #     0,
-            #     0,
-            #     angle,
-            #     reference_frame="odom",
-            #     init=init,
-            # )
-            grasp_pose_ee = convert_obj_frame_to_ee(object_pose, side_grasp.pose)
-            # side_grasp.pose = grasp_pose_ee
-            moveit_grasp.grasp_pose = copy.deepcopy(side_grasp)
-            moveit_grasp.grasp_pose.pose = grasp_pose_ee
-            GRASPS.append(moveit_grasp)
-            # moveit_grasp.grasp_pose = side_grasp
-
-            # moveit_grasp.grasp_pose = side_grasp
-            moveit_grasp.allowed_touch_objects = [obj]
-            moveit_grasp.max_contact_force = 0.5
-
-            # side_grasp.moveit_grasp = moveit_grasp
-            grasps.append((side_grasp, moveit_grasp))
-
-        return [(g[0],) for g in grasps] # For PDDLStream, return only the Poses
     return gen
+
+# def get_grasp_gen(whole_body, scene, robot_state):
+#     def gen(obj):
+#         whole_body.set_start_state(robot_state)
+#         width, length, height = (0.06, 0.16, 0.21) if obj == 'ycb_003_cracker_box' else (0.1, 0.1, 0.1)
+
+#         grasps = []
+#         object_pose = scene.get_object_poses([obj])[obj] # scene returns in odom frame because planning_frame is odom. Idk how to change that.
+
+#         init_quat = (0.707, 0.0, 0.707, 0.0)  # copied from moveit_pick_and_place_demo.py 
+
+#         for angle in [0, np.pi/2, np.pi, -np.pi/2]:
+#             side_grasp = OurPoseStamped()
+#             offset = width/2 + 0.05
+#             side_grasp.pose.position = Point(
+#                 offset * np.cos(angle),
+#                 offset * np.sin(angle),
+#                 height/2
+#             )
+#             quat = T.quaternion_from_euler(0, 0, angle)
+#             side_grasp.pose.orientation = Quaternion(*quat)
+
+#             moveit_grasp = Grasp()
+#             moveit_grasp.id = f"grasp_{len(grasps)}"
+#             moveit_grasp.pre_grasp_posture = make_gripper_posture(0.8) # Open gripper
+#             moveit_grasp.grasp_posture = make_gripper_posture(0.2, -0.02) # Close gripper
+#             moveit_grasp.pre_grasp_approach = make_gripper_translation(0.05, 0.1, [0,0,1])
+#             moveit_grasp.post_grasp_retreat = make_gripper_translation(0.05, 0.1, [0,0,1], "base_footprint")
+#             init = T.quaternion_multiply(init_quat, quat)
+#             # moveit_grasp.grasp_pose = make_pose(
+#             #     offset * np.cos(angle),
+#             #     offset * np.sin(angle),
+#             #     height / 2,
+#             #     0,
+#             #     0,
+#             #     angle,
+#             #     reference_frame="odom",
+#             #     init=init,
+#             # )
+#             grasp_pose_ee = convert_obj_frame_to_ee(object_pose, side_grasp.pose)
+#             moveit_grasp.grasp_pose = copy.deepcopy(side_grasp)
+#             moveit_grasp.grasp_pose.pose = grasp_pose_ee
+#             GRASPS.append(moveit_grasp)
+
+#             # moveit_grasp.grasp_pose = side_grasp
+#             moveit_grasp.allowed_touch_objects = [obj]
+#             moveit_grasp.max_contact_force = 0.5
+
+#             side_grasp.moveit_grasp = moveit_grasp
+#             grasps.append(side_grasp)
+
+#         return [(g,) for g in grasps] # For PDDLStream, return only the Poses
+#     return gen
 
     # def get_grasp_gen(move_group, scene):
-    GRASP_STANDOFF = 0.1
+    # GRASP_STANDOFF = 0.1
 
-    def gen(obj):
-        try:
-            object_pose_dict = scene.get_object_poses([obj])
-        except:
-            rospy.logwarn("Failed to get object pose")
-            return None
+    # def gen(obj):
+    #     try:
+    #         object_pose_dict = scene.get_object_poses([obj])
+    #     except:
+    #         rospy.logwarn("Failed to get object pose")
+    #         return None
 
-        obj_pose = object_pose_dict[obj] # Object pose not needed because we calculate related to the object
-        if obj == 'ycb_003_cracker_box':
-            width, length, height = 0.06, 0.16, 0.21
-        else:
-            width = length = height = 0.1
-        rospy.loginfo(f"Generating grasp poses for {obj}")
-        grasp_dimensions = (width, length, height)
-        grasps = []
-        # Top-down grasp
-        # from primitives import Trajectory, Commands, State, Pose, Conf
-        from geometry_msgs.msg import Pose
-        # top_grasp = Pose()
-        # top_grasp.position.x = obj_pose.position.x
-        # top_grasp.position.y = obj_pose.position.y
-        # top_grasp.position.z = obj_pose.position.z + GRASP_HEIGHT
-        # quat = T.quaternion_from_euler(0, np.pi/2, 0)
-        # top_grasp.orientation.x = quat[0]
-        # top_grasp.orientation.y = quat[1]
-        # top_grasp.orientation.z = quat[2]
-        # top_grasp.orientation.w = quat[3] + GRASP_HEIGHT
-        # grasps.append(top_grasp)
+    #     obj_pose = object_pose_dict[obj] # Object pose not needed because we calculate related to the object
+    #     if obj == 'ycb_003_cracker_box':
+    #         width, length, height = 0.06, 0.16, 0.21
+    #     else:
+    #         width = length = height = 0.1
+    #     rospy.loginfo(f"Generating grasp poses for {obj}")
+    #     grasp_dimensions = (width, length, height)
+    #     grasps = []
+    #     # Top-down grasp
+    #     # from primitives import Trajectory, Commands, State, Pose, Conf
+    #     from geometry_msgs.msg import Pose
+    #     # top_grasp = Pose()
+    #     # top_grasp.position.x = obj_pose.position.x
+    #     # top_grasp.position.y = obj_pose.position.y
+    #     # top_grasp.position.z = obj_pose.position.z + GRASP_HEIGHT
+    #     # quat = T.quaternion_from_euler(0, np.pi/2, 0)
+    #     # top_grasp.orientation.x = quat[0]
+    #     # top_grasp.orientation.y = quat[1]
+    #     # top_grasp.orientation.z = quat[2]
+    #     # top_grasp.orientation.w = quat[3] + GRASP_HEIGHT
+    #     # grasps.append(top_grasp)
 
-        # height_ratios = [0.5, 0.6, 1]
-        # Side grasps relative to the object
-        rospy.loginfo(f"Object pose: {obj_pose}")
-        for angle in [0, np.pi/2, np.pi, -np.pi/2]:
-            # height_ratio = random.choice(height_ratios)
-            height_ratio = 1
-            side_grasp = Pose()
-            x_offset = np.cos(angle) * (width / 2 + GRASP_STANDOFF)
-            y_offset = np.sin(angle) * (width / 2 + GRASP_STANDOFF)
-            z_offset = height_ratio * height - height / 2
+    #     # height_ratios = [0.5, 0.6, 1]
+    #     # Side grasps relative to the object
+    #     rospy.loginfo(f"Object pose: {obj_pose}")
+    #     for angle in [0, np.pi/2, np.pi, -np.pi/2]:
+    #         # height_ratio = random.choice(height_ratios)
+    #         height_ratio = 1
+    #         side_grasp = Pose()
+    #         x_offset = np.cos(angle) * (width / 2 + GRASP_STANDOFF)
+    #         y_offset = np.sin(angle) * (width / 2 + GRASP_STANDOFF)
+    #         z_offset = height_ratio * height - height / 2
 
-            side_grasp.position = Point(x_offset, y_offset, z_offset)
+    #         side_grasp.position = Point(x_offset, y_offset, z_offset)
 
-            roll = 0
-            pitch = 0
-            yaw = angle
+    #         roll = 0
+    #         pitch = 0
+    #         yaw = angle
 
-            quat = T.quaternion_from_euler(roll, pitch, yaw)
-            side_grasp.orientation = Quaternion(*quat)
-            # yield side_grasp
-            rospy.loginfo(f"Generated Side grasp: {side_grasp}")
-            grasps.append(side_grasp)
+    #         quat = T.quaternion_from_euler(roll, pitch, yaw)
+    #         side_grasp.orientation = Quaternion(*quat)
+    #         # yield side_grasp
+    #         rospy.loginfo(f"Generated Side grasp: {side_grasp}")
+    #         grasps.append(side_grasp)
 
-        #     side_grasp.position.x = obj_pose.position.x + SIDE_GRASP_OFFSET*np.cos(angle)
-        #     side_grasp.position.y = obj_pose.position.y + SIDE_GRASP_OFFSET*np.sin(angle)
-        #     side_grasp.position.z = obj_pose.position.z + GRIPPER_LENGTH/2
-        #     quat = T.quaternion_from_euler(0, 0, angle + np.pi)
-        #     side_grasp.orientation.x = quat[0]
-        #     side_grasp.orientation.y = quat[1]
-        #     side_grasp.orientation.z = quat[2]
-        #     side_grasp.orientation.w = quat[3]
-        #     grasps.append(side_grasp)
+    #     #     side_grasp.position.x = obj_pose.position.x + SIDE_GRASP_OFFSET*np.cos(angle)
+    #     #     side_grasp.position.y = obj_pose.position.y + SIDE_GRASP_OFFSET*np.sin(angle)
+    #     #     side_grasp.position.z = obj_pose.position.z + GRIPPER_LENGTH/2
+    #     #     quat = T.quaternion_from_euler(0, 0, angle + np.pi)
+    #     #     side_grasp.orientation.x = quat[0]
+    #     #     side_grasp.orientation.y = quat[1]
+    #     #     side_grasp.orientation.z = quat[2]
+    #     #     side_grasp.orientation.w = quat[3]
+    #     #     grasps.append(side_grasp)
 
-        # random.shuffle(grasps)
+    #     # random.shuffle(grasps)
 
-        # for grasp in grasps:
-        #     target_pose = PoseStamped()
-        #     target_pose.header.frame_id = move_group.get_planning_frame()
-        #     target_pose.pose.position = grasp.position
-        #     target_pose.pose.orientation = grasp.orientation
-        #     move_group.set_end_effector_link("hand_palm_link")
-        #     move_group.set_pose_target(target_pose, "hand_palm_link") #TODO: works with whole_body, not with move_group?
+    #     # for grasp in grasps:
+    #     #     target_pose = PoseStamped()
+    #     #     target_pose.header.frame_id = move_group.get_planning_frame()
+    #     #     target_pose.pose.position = grasp.position
+    #     #     target_pose.pose.orientation = grasp.orientation
+    #     #     move_group.set_end_effector_link("hand_palm_link")
+    #     #     move_group.set_pose_target(target_pose, "hand_palm_link") #TODO: works with whole_body, not with move_group?
 
-        #     plan = move_group.plan()
-        #     if plan[0]:
-        #         return (grasp,)
-        #     else:
-        #         rospy.logwarn(plan[-1])
+    #     #     plan = move_group.plan()
+    #     #     if plan[0]:
+    #     #         return (grasp,)
+    #     #     else:
+    #     #         rospy.logwarn(plan[-1])
 
-        random.shuffle(grasps)
-        return [(grasp,) for grasp in grasps]
+    #     random.shuffle(grasps)
+    #     return [(grasp,) for grasp in grasps]
 
-        # for grasp in grasps:
-        #     yield (grasp,)
-        # return [(g,) for g in grasps]
+    #     # for grasp in grasps:
+    #     #     yield (grasp,)
+    #     # return [(g,) for g in grasps]
 
-        # rospy.logwarn("Failed to find a grasp")
-        # return None
+    #     # rospy.logwarn("Failed to find a grasp")
+    #     # return None
 
-    return gen
+    # return gen
 
 
 def convert_obj_frame_to_ee(obj_pose, grasp_pose):

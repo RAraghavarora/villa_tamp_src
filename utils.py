@@ -10,6 +10,11 @@ from tf import transformations as T
 from geometry_msgs.msg import PoseStamped
 from primitives import Conf
 from tf.transformations import quaternion_from_euler, quaternion_multiply
+import math
+
+GRIPPER_SIZE = 0.135 + 0.02  # Allow some extra room since the bounding box is not tight
+GRIPPER_DEPTH = 0.02
+
 
 def make_gripper_posture(pos, effort=0.0):
     t = JointTrajectory()
@@ -138,3 +143,125 @@ def odom_to_map(object_pose):
             tf2_ros.ConnectivityException,
             tf2_ros.ExtrapolationException) as e:
         rospy.logwarn(f"Failed to transform pose from odom to map: {e}")
+
+
+
+def compute_grasp_poses(bbox, top=False, side=True, relative=False, side_up=False, rigid=True, off_center=False,
+                        pre_grasp=0.0):
+    '''
+    Given a (visualization_msgs/Marker) bounding box
+    Computes potential grasp poses for the motion planner to consume
+
+    :param bbox: bounding box Marker in the 'ground' frame
+    '''
+
+    grasp_poses = []
+
+    # Axes of the object to align to
+    axes_to_align = []
+    gripper_rotation_to_object = []
+    xaxis, yaxis, zaxis = (1, 0, 0), (0, 1, 0), (0, 0, 1)
+
+    # Assuming z points out in gripper axis
+    gripper_axis = np.array([0., 0., 1.])
+
+    # I want to face the opposite direction
+    # ----- objaxis ---> (offset)  <----- gripper axis -----
+
+    # Top and side grasps
+    if top:
+        axes_to_align.append(np.array([0., 0., 1.]))
+        gripper_rotation_to_object.append(T.rotation_matrix(np.pi, xaxis))  #  -- obj_z -> (offset) <- gripper z --, x aligned
+
+    if side:
+        axes_to_align.extend([np.array([1., 0., 0.]),
+                              np.array([-1., 0., 0.])])
+        gripper_rotation_to_object.extend([T.rotation_matrix(-np.pi / 2, yaxis),  # gripper x points up, z points to negative x
+                                           T.rotation_matrix(-np.pi / 2, yaxis) @ T.rotation_matrix(np.pi, xaxis)])  # gripper z points to x
+
+        axes_to_align.extend([np.array([0., 1., 0.]),
+                              np.array([0., -1., 0.])])
+        gripper_rotation_to_object.extend([T.rotation_matrix(np.pi / 2, xaxis) @ T.rotation_matrix(np.pi / 2, zaxis),
+                                           T.rotation_matrix(-np.pi / 2, xaxis) @ T.rotation_matrix(np.pi / 2, zaxis)])
+
+    scale = [bbox.scale.x, bbox.scale.y, bbox.scale.z]
+    for ax, gripper_rotation in zip(axes_to_align, gripper_rotation_to_object):
+        ax_id = np.nonzero(ax)[0][0]
+
+        # Make sure the grasp pose is not in the object
+        gripper_offset = max(0.0, 0.5 * scale[ax_id] - 0.05) + GRIPPER_DEPTH
+        gripper_offset += pre_grasp
+
+        # We want to offset a lil' bit
+        gripper_offset_to_obj = np.dot(gripper_rotation, T.translation_matrix(-gripper_offset * gripper_axis))
+
+        R = T.quaternion_matrix(
+            [bbox.pose.orientation.x, bbox.pose.orientation.y, bbox.pose.orientation.z, bbox.pose.orientation.w])
+        t = T.translation_matrix([bbox.pose.position.x, bbox.pose.position.y, bbox.pose.position.z])
+        obj_to_ground = np.dot(t, R)
+
+        if ax_id < 2:  # side grasp
+            axis_between_gripper = 1 - ax_id
+            if rigid and scale[axis_between_gripper] > GRIPPER_SIZE or (rigid and scale[2] < 0.02) or \
+                    (not rigid and scale[axis_between_gripper] > scale[ax_id]):  # if not rigid, allow grasp along the shorter dimension
+                gripper_angles = []
+            elif side_up:
+                gripper_angles = [0]
+            else:
+                gripper_angles = [0, math.pi]
+        else:  # top grasp
+            gripper_angles = []
+            if scale[0] < GRIPPER_SIZE:  # x axis is between gripper
+                gripper_angles.extend([-math.pi / 2, math.pi / 2])
+            if scale[1] < GRIPPER_SIZE:  # y axis is between gripper
+                gripper_angles.extend([-math.pi, 0])
+            if not rigid and scale[0] >= GRIPPER_SIZE and scale[1] >= GRIPPER_SIZE:  # if not rigid, allow grasp along the shorter dimension
+                if scale[0] < scale[1]:
+                    gripper_angles.extend([-math.pi / 2, math.pi / 2])
+                else:
+                    gripper_angles.extend([-math.pi, 0])
+
+        for angle in gripper_angles:
+            r = T.rotation_matrix(angle, np.array([0., 0., 1.]))
+            gripper_to_obj_rotated = np.dot(gripper_offset_to_obj, r)
+
+            if ax_id < 2 and scale[2] < 0.08:
+                x_offsets = [0.04]
+            elif ax_id < 2 and scale[2] > 0.2 and off_center:
+                # not top grasp, add offsets
+                # if side_up:
+                #     x_offsets = [scale[2] / 2 - 0.05, 0]
+                # else:
+                x_offsets = [scale[2] / 2 - 0.05, 0, -(scale[2] / 2 - 0.05)]
+            else:
+                x_offsets = [0]
+
+            for x_offset in x_offsets:
+                trans = T.translation_matrix([x_offset, 0, 0])
+                gripper_to_obj = gripper_to_obj_rotated @ trans
+
+                if relative:
+                    position = gripper_to_obj[:3, 3]
+                    rot = np.eye(4)
+                    rot[:3, :3] = gripper_to_obj[:3, :3]
+                else:
+                    gripperToGround = np.dot(obj_to_ground, gripper_to_obj)
+                    position = gripperToGround[:3, 3]
+                    rot = np.eye(4)
+                    rot[:3, :3] = gripperToGround[:3, :3]
+
+                quat = T.quaternion_from_matrix(rot)
+                pose = PoseStamped()
+                pose.header.frame_id = bbox.header.frame_id
+                pose.pose.position.x = position[0]
+                pose.pose.position.y = position[1]
+                pose.pose.position.z = position[2]
+                pose.pose.orientation.x = quat[0]
+                pose.pose.orientation.y = quat[1]
+                pose.pose.orientation.z = quat[2]
+                pose.pose.orientation.w = quat[3]
+
+                print (ax_id, angle, gripper_to_obj[:3, 3])
+                grasp_poses.append(pose)
+
+    return grasp_poses

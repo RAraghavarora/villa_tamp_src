@@ -57,7 +57,7 @@ def add_object(scene, object_name):
     elif object_name == "kitchen_table":
         table_height = 0.68
         pose_stamped.pose.position.z = table_height / 2
-        dimensions = (0.68, 1.13, table_height)
+        dimensions = (0.68+0.1, 1.13+0.1, table_height)
         # pose.position.z = 0.68
         # dimensions = (0.68, 1.13, 0.04)
     else:
@@ -130,9 +130,7 @@ def main():
     joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
     robot_state.joint_state = joint_state
     whole_body.set_start_state(robot_state)
-    get_state = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
-    breakpoint()
-
+    # get_state = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
     # Create problem instance and robot command interface
 
     arm_joints = [
@@ -154,7 +152,7 @@ def main():
     object_name = "ycb_003_cracker_box"
     # object_name = 'ycb_014_lemon'
     add_object(scene, object_name)
-    add_object(scene, 'kitchen_table')
+    # add_object(scene, 'kitchen_table')
     if object_name in scene.get_known_object_names():
         object_pose_dict = scene.get_object_poses([object_name])
         object_pose = Pose()
@@ -166,7 +164,7 @@ def main():
 
     base_motion_gen = get_base_motion_gen(whole_body, robot_state)
     arm_motion_gen = get_arm_motion_gen(whole_body, robot_state)
-    grasp_gen = get_grasp_gen(whole_body, scene, robot_state)
+    grasp_gen = get_grasp_gen(whole_body, scene, robot_state, hsrb_gripper)
     ik_fn = get_ik_fn(whole_body, arm_group, robot_state)
 
     domain_pddl = read(
@@ -225,46 +223,46 @@ def main():
     for i, (name, args) in enumerate(plan):
         rospy.loginfo("Step %d: %s %s", i, name, args)
         
-        if name == "move_base":
-            q1, t, q2 = args
-            # Set final target
-            trajectory = t.commands[0]
-            if trajectory.moveit_plan is not None:
-                rospy.loginfo("Executing move base plan")
-                whole_body.execute(trajectory.moveit_plan)
-            else:
-                joint_values = [
-                    q2.values[0],  # x
-                    q2.values[1],  # y
-                    q2.values[2],  # theta
-                ]
-                whole_body.set_joint_value_target("world_joint", joint_values)
-                success = whole_body.go(wait=True)
-                if not success:
-                    rospy.logwarn("Failed to execute the plan")
-                    return
+        # if name == "move_base":
+        #     q1, t, q2 = args
+        #     # Set final target
+        #     trajectory = t.commands[0]
+        #     if trajectory.moveit_plan is not None:
+        #         rospy.loginfo("Executing move base plan")
+        #         whole_body.execute(trajectory.moveit_plan)
+        #     else:
+        #         joint_values = [
+        #             q2.values[0],  # x
+        #             q2.values[1],  # y
+        #             q2.values[2],  # theta
+        #         ]
+        #         whole_body.set_joint_value_target("world_joint", joint_values)
+        #         success = whole_body.go(wait=True)
+        #         if not success:
+        #             rospy.logwarn("Failed to execute the plan")
+        #             return
 
-        elif name == "move_arm":
-            a, q1, t, q2 = args
+        # elif name == "move_arm":
+        #     a, q1, t, q2 = args
 
-            trajectory = t.commands[0]
-            if trajectory.moveit_plan is not None:
-                rospy.loginfo("Executing move arm plan")
-                arm_group.execute(trajectory.moveit_plan)
-            else:
-                # Set initial target
-                joint_values = [
-                    q1.values[0],  # x
-                    q1.values[1],  # y
-                    q1.values[2],  # theta
-                ]
-                arm_group.set_joint_value_target("world_joint", joint_values)
-                success = arm_group.go(wait=True)
-                if not success:
-                    rospy.logwarn("Failed to execute the plan")
-                    return
+        #     trajectory = t.commands[0]
+        #     if trajectory.moveit_plan is not None:
+        #         rospy.loginfo("Executing move arm plan")
+        #         arm_group.execute(trajectory.moveit_plan)
+        #     else:
+        #         # Set initial target
+        #         joint_values = [
+        #             q1.values[0],  # x
+        #             q1.values[1],  # y
+        #             q1.values[2],  # theta
+        #         ]
+        #         arm_group.set_joint_value_target("world_joint", joint_values)
+        #         success = arm_group.go(wait=True)
+        #         if not success:
+        #             rospy.logwarn("Failed to execute the plan")
+        #             return
 
-        elif name == "pick":
+        if name == "pick":
             _, obj, pose, grasp, q, bq = args
             import moveit_msgs.msg
             n_attempts = 0
@@ -272,13 +270,15 @@ def main():
             while (result != moveit_msgs.msg.MoveItErrorCodes.SUCCESS) and (n_attempts < 2):
                 n_attempts += 1
                 rospy.loginfo("Pick attempt: " + str(n_attempts))
-                for grasp in GRASPS:
-                    result = whole_body.pick(obj, grasp)
+                for grsp in GRASPS:
+                    result = whole_body.pick(obj, grsp)
                     if result == moveit_msgs.msg.MoveItErrorCodes.SUCCESS:
                         break
                     else:
                         print(result)
                     rospy.sleep(0.2)
+            breakpoint()
+            result=whole_body.pick(obj, grasp.moveit_grasp)
             if hasattr(bq, 'moveit_plan') and bq.moveit_plan is not None:
                 rospy.loginfo("Executing move base plan of the pick action")
                 whole_body.execute(bq.moveit_plan)
