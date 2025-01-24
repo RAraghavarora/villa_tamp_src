@@ -8,6 +8,7 @@ import moveit_commander
 import actionlib
 import numpy as np
 from tf import transformations as T
+from visualization_msgs.msg import Marker
 
 from pddlstream.algorithms.meta import solve # type: ignore
 from pddlstream.utils import read # type: ignore
@@ -36,7 +37,7 @@ def add_object(scene, object_name):
 
     pose_stamped = PoseStamped()
     pose_stamped.header.frame_id = "map"
-    pose_stamped.header.stamp = rospy.Time.now()
+    # pose_stamped.header.stamp = rospy.Time.now()
     pose_stamped.pose = pose
 
     if object_name == "ycb_003_cracker_box":
@@ -53,7 +54,8 @@ def add_object(scene, object_name):
         # pose.orientation.y = rotated_quaternion[1]
         # pose.orientation.z = rotated_quaternion[2]
         # pose.orientation.w = rotated_quaternion[3]
-        dimensions = (0.06, 0.16, 0.21)
+        dimensions = (0.05, 0.14, 0.19)
+        pose_stamped.pose.position.z += 0.05
     elif object_name == "kitchen_table":
         table_height = 0.68
         pose_stamped.pose.position.z = table_height / 2
@@ -70,8 +72,64 @@ def add_object(scene, object_name):
     #         "/opt/ros/noetic/share/tmc_gazebo_worlds/models/kitchen_table/model-1_4.sdf",
     #     )
     # else:
+    breakpoint()
     scene.add_box(object_name, pose_stamped, dimensions)
+    return pose_stamped
     rospy.sleep(1.0)
+
+def add_marker(scene, name, marker):
+    added_box = PoseStamped()
+    added_box.header.frame_id = marker.header.frame_id
+    added_box.pose = marker.pose
+    scene.add_box(name, added_box, (marker.scale.x, marker.scale.y, marker.scale.z))
+    rospy.sleep(1.0)
+
+def get_object_pose(scene, object_name):
+    rospy.wait_for_service("/gazebo/get_model_state")
+    get_state = rospy.ServiceProxy("/gazebo/get_model_state", GetModelState)
+    state = get_state(object_name, "")
+
+    pose = state.pose
+    pose.position.z = pose.position.z + 0.105
+
+    pose_stamped = PoseStamped()
+    pose_stamped.header.frame_id = "map"
+    # pose_stamped.header.stamp = rospy.Time.now()
+    pose_stamped.pose = pose
+
+    if object_name == "ycb_003_cracker_box":
+        # quaternion = (
+        #     pose.orientation.x,
+        #     pose.orientation.y,
+        #     pose.orientation.z,
+        #     pose.orientation.w,
+        # )
+        # euler = T.euler_from_quaternion(quaternion)
+        # rotated_euler = (euler[0], euler[1], euler[2] + np.pi / 2)
+        # rotated_quaternion = T.quaternion_from_euler(*rotated_euler)
+        # pose.orientation.x = rotated_quaternion[0]
+        # pose.orientation.y = rotated_quaternion[1]
+        # pose.orientation.z = rotated_quaternion[2]
+        # pose.orientation.w = rotated_quaternion[3]
+        dimensions = (0.05, 0.14, 0.19)
+        pose_stamped.pose.position.z += 0.05
+    elif object_name == "kitchen_table":
+        table_height = 0.68
+        pose_stamped.pose.position.z = table_height / 2
+        dimensions = (0.68+0.1, 1.13+0.1, table_height)
+        # pose.position.z = 0.68
+        # dimensions = (0.68, 1.13, 0.04)
+    else:
+        dimensions = (0.1, 0.1, 0.1)
+    # if object_name == 'kitchen_table':
+    #     breakpoint()
+    #     scene.add_mesh(
+    #         object_name,
+    #         pose_stamped,
+    #         "/opt/ros/noetic/share/tmc_gazebo_worlds/models/kitchen_table/model-1_4.sdf",
+    #     )
+    # else:
+    return pose_stamped
 
 
 def init_robot_state():
@@ -151,20 +209,55 @@ def main():
 
     object_name = "ycb_003_cracker_box"
     # object_name = 'ycb_014_lemon'
-    add_object(scene, object_name)
+    table_name = 'kitchen_table'
+    obj_pose = get_object_pose(scene, object_name)
+    table_pose = get_object_pose(scene, 'kitchen_table')
+
+    cracker_map_frame_pose = obj_pose.pose
+    cracker = Marker()
+    cracker.header.frame_id = "map"
+    cracker.pose.position.x = cracker_map_frame_pose.position.x
+    cracker.pose.position.y = cracker_map_frame_pose.position.y
+    cracker.pose.position.z = cracker_map_frame_pose.position.z
+    cracker.pose.orientation.x = cracker_map_frame_pose.orientation.x
+    cracker.pose.orientation.y = cracker_map_frame_pose.orientation.y
+    cracker.pose.orientation.z = cracker_map_frame_pose.orientation.z
+    cracker.pose.orientation.w = cracker_map_frame_pose.orientation.w
+    cracker.scale.x = 0.08
+    cracker.scale.y = 0.10
+    cracker.scale.z = 0.08
+    add_marker(scene, object_name, cracker)
+
+    
+
+    table_map_frame_pose = table_pose.pose
+    table = Marker()
+    table.header.frame_id = "map"
+    table.pose.position.x = table_map_frame_pose.position.x
+    table.pose.position.y = table_map_frame_pose.position.y
+    table.pose.position.z = table_map_frame_pose.position.z
+    table.pose.orientation.x = table_map_frame_pose.orientation.x
+    table.pose.orientation.y = table_map_frame_pose.orientation.y
+    table.pose.orientation.z = table_map_frame_pose.orientation.z
+    table.pose.orientation.w = table_map_frame_pose.orientation.w
+    table.scale.x = 0.68
+    table.scale.y = 1.13
+    table.scale.z = 0.68
+    # add_marker(scene, table_name, table)
+
     # add_object(scene, 'kitchen_table')
-    if object_name in scene.get_known_object_names():
-        object_pose_dict = scene.get_object_poses([object_name])
-        object_pose = Pose()
-        object_pose.position = object_pose_dict[object_name].position
-        object_pose.orientation = object_pose_dict[object_name].orientation
-    else:
-        rospy.loginfo("Object not found in scene")
-        return
+    # if object_name in scene.get_known_object_names():
+    #     object_pose_dict = scene.get_object_poses([object_name])
+    #     object_pose = Pose()
+    #     object_pose.position = object_pose_dict[object_name].position
+    #     object_pose.orientation = object_pose_dict[object_name].orientation
+    # else:
+    #     rospy.loginfo("Object not found in scene")
+    #     return
 
     base_motion_gen = get_base_motion_gen(whole_body, robot_state)
     arm_motion_gen = get_arm_motion_gen(whole_body, robot_state)
-    grasp_gen = get_grasp_gen(whole_body, scene, robot_state, hsrb_gripper)
+    grasp_gen = get_grasp_gen(whole_body, scene, obj_pose, hsrb_gripper)
     ik_fn = get_ik_fn(whole_body, arm_group, robot_state)
 
     domain_pddl = read(
@@ -190,8 +283,8 @@ def main():
 
         # Object
         ("Object", object_name),
-        ("Pose", object_name, object_pose),
-        ("AtPose", object_name, object_pose),
+        ("Pose", object_name, obj_pose.pose),
+        ("AtPose", object_name, obj_pose.pose),
         ("Graspable", object_name),
         ("OnTable", object_name, "kitchen_table"),
         ("Clear", object_name),
@@ -205,7 +298,7 @@ def main():
         "inverse-kinematics": from_gen_fn(ik_fn),
     }
 
-    whole_body.set_support_surface_name("kitchen_table")
+    # whole_body.set_support_surface_name("kitchen_table")
     # Create and solve problem
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
     solution = solve(pddl_problem)

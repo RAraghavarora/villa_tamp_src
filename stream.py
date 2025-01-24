@@ -91,11 +91,12 @@ def get_arm_motion_gen(move_group, robot_state):
 
     return fn
 
-def get_grasp_gen(whole_body, scene, robot_state, hsrb_gripper):
+def get_grasp_gen(whole_body, scene, obj_pose, hsrb_gripper):
     def gen(obj):
-        odom_frame_pose = scene.get_object_poses([obj])[obj]
-        map_frame_pose = odom_to_map(odom_frame_pose).pose
+        # odom_frame_pose = scene.get_object_poses([obj])[obj]
+        # map_frame_pose = odom_to_map(odom_frame_pose).pose
         # create a marker for the object
+        map_frame_pose = obj_pose.pose
         bbox = Marker()
         bbox.header.frame_id = "map"
         bbox.pose.position.x = map_frame_pose.position.x
@@ -105,10 +106,10 @@ def get_grasp_gen(whole_body, scene, robot_state, hsrb_gripper):
         bbox.pose.orientation.y = map_frame_pose.orientation.y
         bbox.pose.orientation.z = map_frame_pose.orientation.z
         bbox.pose.orientation.w = map_frame_pose.orientation.w
-        bbox.scale.x = 0.06
-        bbox.scale.y = 0.16
-        bbox.scale.z = 0.21
-        grasps = compute_grasp_poses(bbox, top=False, side=True, relative=False, side_up=False, rigid=True, off_center=False,
+        bbox.scale.x = 0.08
+        bbox.scale.y = 0.18
+        bbox.scale.z = 0.23
+        grasps = compute_grasp_poses(bbox, top=False, side=True, relative=False, side_up=True, rigid=True, off_center=False,
                                     pre_grasp=0.05)
         
         for grasp in grasps:
