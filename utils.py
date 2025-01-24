@@ -69,48 +69,6 @@ def matrix_to_pose(matrix):
     return pose
 
 
-def get_ik_fn_old(whole_body, arm_group):
-    # This generates correct arm conf, but very wrong base conf
-    move_group = whole_body
-    HAND_TF = "hand_palm_link"
-
-    def fn(arm, obj, obj_pose, grasp):
-        # grasp_pose will be relative to the object
-        try:
-            rospy.loginfo(f"Object Pose: {obj_pose}")
-            rospy.loginfo(f"Grasp Pose (in object frame): {grasp}")
-            obj_matrix = pose_to_matrix(obj_pose)
-            grasp_matrix = pose_to_matrix(grasp)
-
-            world_grasp_matrix = np.dot(obj_matrix, grasp_matrix) # grasp_pose -> world
-            world_grasp_pose = matrix_to_pose(world_grasp_matrix)
-            rospy.loginfo(f"Grasp Pose (in world frame): {world_grasp_pose}")
-
-            target_pose = PoseStamped()
-            target_pose.header.frame_id = 'map' # Since obj_pose is now in world frame
-            target_pose.pose = world_grasp_pose
-            whole_body.set_pose_target(target_pose, HAND_TF) # target for EE
-            plan = whole_body.plan()
-            if plan[0]:
-                rospy.loginfo("Found a valid IK plan")
-                arm_joint_values = [plan[1].joint_trajectory.points[-1].positions[i] for i in range(6)] # 6 joints in arm
-                base_joint_values = whole_body.get_current_joint_values()[:3] # x,y,theta
-                rospy.loginfo(f"Arm Joint Values: {arm_joint_values}")
-                rospy.loginfo(f"Base Joint Values: {base_joint_values}")
-                arm_conf = Conf(arm_group, arm_group.get_active_joints(), arm_joint_values, moveit_plan=plan[1])
-                base_conf = Conf(whole_body, ["world_joint"], base_joint_values)
-                yield (arm_conf, base_conf)
-            else:
-                rospy.logwarn("Failed to find IK plan")
-                return None
-        except MoveItCommanderException as e:
-            rospy.logwarn(f"Failed to find an IK solution: {e}")
-            return None
-        finally:
-            move_group.clear_pose_targets()
-
-    return fn
-
 def make_pose(x, y, z, roll, pitch, yaw, reference_frame="map", init=(0.707, 0.0, 0.707, 0.0)):
     pose = PoseStamped()
     pose.header.frame_id = reference_frame
@@ -265,3 +223,18 @@ def compute_grasp_poses(bbox, top=False, side=True, relative=False, side_up=Fals
                 grasp_poses.append(pose)
 
     return grasp_poses
+
+def convert_obj_frame_to_ee(obj_pose, grasp_pose):
+    hand_correction = np.array([
+        [1, 0,  0, 0],
+        [0, 0, -1, 0],
+        [0, 1,  0, 0],
+        [0, 0,  0, 1]
+    ])
+    obj_pose_map = odom_to_map(obj_pose).pose
+    obj_matrix = pose_to_matrix(obj_pose_map)
+    grasp_matrix = pose_to_matrix(grasp_pose)
+    world_grasp_matrix = np.dot(obj_matrix, grasp_matrix) # obj_frame -> map
+    corrected_world_grasp_matrix = np.dot(world_grasp_matrix, hand_correction) # map -> EE?
+    world_grasp_pose = matrix_to_pose(corrected_world_grasp_matrix)
+    return world_grasp_pose
