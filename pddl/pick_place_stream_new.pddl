@@ -6,17 +6,12 @@
     :certified (and (Grasp ?o ?g) (BConf ?bq))
   )
 
-  (:stream sample-pose
-    :inputs (?o)
-    :domain (Object ?o)
-    :outputs (?p)
-    :certified (Pose ?o ?p)
+  (:stream sample-place
+    :inputs (?o ?l)
+    :domain (and (Object ?o) (Loc ?l))
+    :outputs (?p ?bq)
+    :certified (and (Supported ?o ?p ?l) 
+                   (Pose ?o ?p)
+                   (BConf ?bq))
   )
-
-  ; (:stream sample-place
-  ;   :inputs (?o ?t)
-  ;   :domain (and (Object ?o) (Table ?t))
-  ;   :outputs (?p)
-  ;   :certified (Pose ?o ?p)
-  ; )
 )

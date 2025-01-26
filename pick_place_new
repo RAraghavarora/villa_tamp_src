@@ -16,7 +16,6 @@ from primitives import Conf
 from stream import (
     get_grasp_gen,
     get_place_gen,
-    get_pose_gen
 )
 from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
 from geometry_msgs.msg import PoseStamped, Pose
@@ -38,10 +37,10 @@ def add_object(scene, object_name):
     pose_stamped.pose = pose
 
     if object_name == "ycb_003_cracker_box":
-        dimensions = (0.05, 0.14, 0.19)
+        dimensions = (0.06, 0.16, 0.20)
         pose_stamped.pose.position.z += 0.05
     elif object_name == "kitchen_table":
-        table_height = 0.68
+        table_height = 0.70
         pose_stamped.pose.position.z = table_height / 2
         dimensions = (0.68, 1.13, table_height)
     else:
@@ -54,7 +53,7 @@ def post_process(whole_body, hsrb_gripper, plan):
     for i, (name, args) in enumerate(plan):
         rospy.loginfo("Step %d: %s %s", i, name, args)
         if name == "pick":
-            arm, object, pose, grasp, bq = args
+            arm, object, pose, grasp, bq, l = args
             if grasp.plan is not None:
                 whole_body.execute(grasp.plan)
                 hsrb_gripper.apply_force(0.2)
@@ -103,14 +102,14 @@ def main():
     # Initial state
     init = [
         ("Arm", "arm"),
+        ("Loc", "kitchen_table"),
         ("HandEmpty",),
         ("BConf", start_base_conf),
         ("AtBConf", start_base_conf),
-        ("Table", "kitchen_table"),
         ("Object", object_name),
         ("AtPose", object_name, obj_pose.pose),
         ("Graspable", object_name),
-        ("OnTable", object_name, "kitchen_table"),
+        ("Supported", object_name, obj_pose.pose, "kitchen_table"),
         ("Clear", object_name),
         ("Pose", object_name, obj_pose.pose),
     ]
@@ -118,12 +117,12 @@ def main():
     goal = ("Holding", object_name)
 
     grasp_gen = get_grasp_gen(whole_body, obj_pose, hsrb_gripper)
-    place_gen = get_place_gen(whole_body, table_pose)
+    place_gen = get_place_gen(whole_body, table_pose, hsrb_gripper)
     
     stream_map = {
         "sample-grasp": from_list_fn(grasp_gen),
-        "sample-pose": from_gen_fn(get_pose_gen(scene)),
-        # "sample-place": from_fn(place_gen)
+        # "sample-pose": from_gen_fn(get_pose_gen(scene)),
+        "sample-place": from_fn(place_gen)
     }
 
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
