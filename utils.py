@@ -11,6 +11,7 @@ from geometry_msgs.msg import PoseStamped
 from primitives import Conf
 from tf.transformations import quaternion_from_euler, quaternion_multiply
 import math
+from gazebo_msgs.srv import GetModelState
 
 GRIPPER_SIZE = 0.135 + 0.02  # Allow some extra room since the bounding box is not tight
 GRIPPER_DEPTH = 0.02
@@ -238,3 +239,9 @@ def convert_obj_frame_to_ee(obj_pose, grasp_pose):
     corrected_world_grasp_matrix = np.dot(world_grasp_matrix, hand_correction) # map -> EE?
     world_grasp_pose = matrix_to_pose(corrected_world_grasp_matrix)
     return world_grasp_pose
+
+def get_gazebo_state(name):
+    rospy.wait_for_service('/gazebo/get_model_state')
+    get_model_state = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
+    model_state = get_model_state(name, 'world') # 'world', 'map', '' are the same
+    return model_state

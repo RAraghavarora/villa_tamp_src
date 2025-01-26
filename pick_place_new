@@ -9,15 +9,14 @@ from visualization_msgs.msg import Marker
 
 from pddlstream.algorithms.meta import solve  # type: ignore
 from pddlstream.utils import read  # type: ignore
-from pddlstream.language.generator import from_fn, from_list_fn, from_gen_fn  # type: ignore
+from pddlstream.language.generator import from_fn, from_list_fn, from_list_gen_fn, from_gen_fn  # type: ignore
 from pddlstream.language.constants import PDDLProblem  # type: ignore
 
 from primitives import Conf
-from old_stream import (
-    get_arm_motion_gen,
+from stream import (
     get_grasp_gen,
-    get_ik_fn,
-    get_base_motion_gen,
+    get_place_gen,
+    get_pose_gen
 )
 from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
 from geometry_msgs.msg import PoseStamped, Pose
@@ -31,7 +30,6 @@ HAND_TF = "hand_palm_link"
 
 def add_object(scene, object_name):
     state = get_gazebo_state(object_name)
-
     pose = state.pose
     pose.position.z = pose.position.z + 0.105
 
@@ -52,26 +50,17 @@ def add_object(scene, object_name):
     return pose_stamped
 
 
-def post_process(whole_body, arm, plan):
+def post_process(whole_body, hsrb_gripper, plan):
     for i, (name, args) in enumerate(plan):
         rospy.loginfo("Step %d: %s %s", i, name, args)
-        if name == "move_base":
-            q1, t, q2 = args
-            trajectory = t.commands[0]
-            rospy.loginfo("Executing move base plan")
-            whole_body.execute(trajectory.moveit_plan)
-
-        elif name == "move_arm":
-            a, q1, t, q2 = args
-            rospy.loginfo("Executing move arm plan")
-            arm.execute(trajectory.moveit_plan)
-
-        elif name == "pick":
-            _, obj, pose, grasp, q, bq = args
-            if hasattr(bq, "moveit_plan") and bq.moveit_plan is not None:
-                rospy.loginfo("Executing move base plan of the pick action")
-                whole_body.execute(bq.moveit_plan)
-                rospy.sleep(0.5)
+        if name == "pick":
+            arm, object, pose, grasp, bq = args
+            if grasp.plan is not None:
+                whole_body.execute(grasp.plan)
+                hsrb_gripper.apply_force(0.2)
+            else:
+                rospy.logwarn("Plan not found in the grasp")
+                return
 
 
 def main():
@@ -80,19 +69,13 @@ def main():
     hsrb_gripper = hsrb_robot.get("gripper")
     while not rospy.is_shutdown():
         try:
-            arm_group = moveit_commander.MoveGroupCommander("arm", wait_for_servers=0.0)
             whole_body = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
-            # base_group = moveit_commander.MoveGroupCommander("base", wait_for_servers=0.0)
-            arm_group.set_pose_reference_frame("base_link")
             whole_body.set_pose_reference_frame("map")
-            # base_group.set_pose_reference_frame("map")
             scene = moveit_commander.PlanningSceneInterface()
-
+            
             whole_body.allow_replanning(True)
             whole_body.set_planning_time(10)
             whole_body.set_max_velocity_scaling_factor(0.7)
-            end_effector = whole_body.get_end_effector_link()
-            
             break
         except RuntimeError as e:
             print("Failed to launch, retrying ", e)
@@ -103,72 +86,46 @@ def main():
     robot_state.joint_state = joint_state
     whole_body.set_start_state(robot_state)
 
-
-    arm_joints = [
-        "arm_lift_joint",
-        "arm_flex_joint",
-        "arm_roll_joint",
-        "wrist_flex_joint",
-        "wrist_roll_joint",
-        "wrist_ft_sensor_frame_joint",
-    ]
-    base_joint = "world_joint"
-    # Get current arm configuration for start
-    current_joints = arm_group.get_current_joint_values()
-    start_arm_conf = Conf(arm_group, arm_joints, current_joints)
-
     robot_start_state = get_gazebo_state("hsrb")
     start_base_values = robot_start_state.pose.position
-    start_base_conf = Conf(whole_body, [base_joint], start_base_values)
+    start_base_conf = Conf(whole_body, ["world_joint"], start_base_values)
 
+    # Add objects to scene
     object_name = "ycb_003_cracker_box"
     obj_pose = add_object(scene, object_name)
-    # add_object(scene, 'kitchen_table')
+    table_pose = add_object(scene, 'kitchen_table')
 
-    base_motion_gen = get_base_motion_gen(whole_body, robot_state)
-    arm_motion_gen = get_arm_motion_gen(whole_body, robot_state)
-    grasp_gen = get_grasp_gen(whole_body, obj_pose, hsrb_gripper)
-    ik_fn = get_ik_fn(whole_body, arm_group, robot_state)
 
-    domain_pddl = read(
-        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/older_pddl_files/pick_place_domain.pddl"
-    )
-    stream_pddl = read(
-        "/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/older_pddl_files/pick_place_stream.pddl"
-    )
+    # Read PDDL files
+    domain_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_domain_new.pddl")
+    stream_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_stream_new.pddl")
 
+    # Initial state
     init = [
-        # Arm
         ("Arm", "arm"),
-        ("ArmConf", start_arm_conf),
-        ("AtArmConf", "arm", start_arm_conf),
         ("HandEmpty",),
-
-        # Base
         ("BConf", start_base_conf),
         ("AtBConf", start_base_conf),
-
-        # Receptacle
         ("Table", "kitchen_table"),
-
-        # Object
         ("Object", object_name),
-        ("Pose", object_name, obj_pose.pose),
         ("AtPose", object_name, obj_pose.pose),
         ("Graspable", object_name),
         ("OnTable", object_name, "kitchen_table"),
         ("Clear", object_name),
+        ("Pose", object_name, obj_pose.pose),
     ]
+    
     goal = ("Holding", object_name)
 
+    grasp_gen = get_grasp_gen(whole_body, obj_pose, hsrb_gripper)
+    place_gen = get_place_gen(whole_body, table_pose)
+    
     stream_map = {
-        "plan-base-motion": from_fn(base_motion_gen),
-        "plan-arm-motion": from_fn(arm_motion_gen),
         "sample-grasp": from_list_fn(grasp_gen),
-        "inverse-kinematics": from_gen_fn(ik_fn),
+        "sample-pose": from_gen_fn(get_pose_gen(scene)),
+        # "sample-place": from_fn(place_gen)
     }
 
-    # Create and solve problem
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
     solution = solve(pddl_problem)
     if solution is None:
@@ -182,6 +139,7 @@ def main():
         return
     
     rospy.loginfo("Executing the plan: %s", plan)
+    post_process(whole_body, hsrb_gripper, plan)
 
 
 if __name__ == "__main__":
