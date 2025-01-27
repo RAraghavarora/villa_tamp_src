@@ -2,19 +2,23 @@ from primitives import Trajectory, Commands, State, Conf, PoseStamped as OurPose
 from geometry_msgs.msg import PoseStamped
 from tf import transformations as T
 import numpy as np
-from utils import compute_grasp_poses
+from utils import compute_grasp_poses, odom_to_map
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point, Quaternion
 
-def get_grasp_gen(whole_body, obj_pose, hsrb_gripper):
+def get_grasp_gen(scene):
     def gen(obj):
         bbox = Marker()
         bbox.header.frame_id = "map"
-        bbox.pose = obj_pose.pose
-        bbox.scale.x = 0.06  # cracker box dimensions
-        bbox.scale.y = 0.16
-        bbox.scale.z = 0.21
-
+        bbox.pose = odom_to_map(scene.get_object_poses([obj])[obj]).pose
+        if obj == "ycb_003_cracker_box":
+            bbox.scale.x = 0.06  # cracker box dimensions
+            bbox.scale.y = 0.16
+            bbox.scale.z = 0.21
+        else:
+            bbox.scale.x = 0.01
+            bbox.scale.y = 0.01
+            bbox.scale.z = 0.01
         grasps = compute_grasp_poses(
             bbox,
             top=False, 
@@ -23,33 +27,23 @@ def get_grasp_gen(whole_body, obj_pose, hsrb_gripper):
             side_up=True,
             rigid=True,
             off_center=False,
-            pre_grasp=0.06
+            pre_grasp=0.2
         )
-        possible_grasps = []
-        possible_base_confs = []
-
-        hsrb_gripper.command(1.0)
-        for grasp in grasps:
-            whole_body.set_pose_target(grasp)
-            plan = whole_body.plan()
-            if plan[0]:
-                # Calculate base position for this grasp
-                angle_to_obj = np.arctan2(grasp.pose.position.y, grasp.pose.position.x)
-                base_x = grasp.pose.position.x - 0.5*np.cos(angle_to_obj)
-                base_y = grasp.pose.position.y - 0.5*np.sin(angle_to_obj)
-                base_theta = angle_to_obj
-                
-                base_conf = Conf(whole_body, ["world_joint"], [base_x, base_y, base_theta])
-                converted_grasp = OurPoseStamped()
-                converted_grasp.header.frame_id = grasp.header.frame_id
-                converted_grasp.pose = grasp.pose
-                converted_grasp.plan = plan[1]
-                possible_grasps.append(converted_grasp)
-                possible_base_confs.append(base_conf)
-            
-        return [(g,b,) for g,b in zip(possible_grasps, possible_base_confs)]
-            
+        return [(g,) for g in grasps]
     return gen
+
+def pick_motion(whole_body):
+    def gen_pick(a ,o ,p ,g ,q1):
+        q1_config = q1.robot_state
+        whole_body.set_start_state(q1_config)
+        whole_body.set_pose_target(g)
+        plan = whole_body.plan()
+        if not plan[0]:
+            yield None
+        else:
+            # cmd = Commands(State(), savers=[BodySaver(robot)], commands=[plan[1]])
+            yield (plan[1], ) 
+    return gen_pick
 
 def get_place_gen(whole_body, table_pose):
     def gen(obj):

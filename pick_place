@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+from sensor_msgs.msg import JointState
+import time
+import rospy
+import moveit_commander
+import numpy as np
+from tf import transformations as T
+from visualization_msgs.msg import Marker
+
+from pddlstream.algorithms.meta import solve  # type: ignore
+from pddlstream.utils import read  # type: ignore
+from pddlstream.language.generator import from_fn, from_list_fn, from_list_gen_fn, from_gen_fn  # type: ignore
+from pddlstream.language.constants import PDDLProblem  # type: ignore
+
+from primitives import Conf
+from stream import (
+    get_grasp_gen,
+    pick_motion,
+)
+from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
+from geometry_msgs.msg import PoseStamped, Pose
+from control_msgs.msg import GripperCommandAction, GripperCommandGoal
+from gazebo_msgs.srv import GetModelState
+import hsrb_interface
+from utils import get_gazebo_state
+
+GRASP_FORCE = 0.2
+HAND_TF = "hand_palm_link"
+
+def add_object(scene, object_name):
+    state = get_gazebo_state(object_name)
+    pose = state.pose
+    pose.position.z = pose.position.z + 0.105
+
+    pose_stamped = PoseStamped()
+    pose_stamped.header.frame_id = "map"
+    pose_stamped.pose = pose
+
+    if object_name == "ycb_003_cracker_box":
+        dimensions = (0.06, 0.16, 0.20)
+        pose_stamped.pose.position.z += 0.05
+    elif object_name == "kitchen_table":
+        table_height = 0.70
+        pose_stamped.pose.position.z = table_height / 2
+        dimensions = (0.68, 1.13, table_height)
+    else:
+        dimensions = (0.1, 0.1, 0.1)
+    scene.add_box(object_name, pose_stamped, dimensions)
+    return pose_stamped
+
+
+def post_process(whole_body, hsrb_gripper, plan):
+    for i, (name, args) in enumerate(plan):
+        rospy.loginfo("Step %d: %s %s", i, name, args)
+        if name == "pick":
+            arm, obj, pose, grasp, q, t = args
+            if t is not None:
+                whole_body.execute(t)
+                hsrb_gripper.apply_force(0.2)
+            else:
+                rospy.logwarn("Plan not found in the grasp")
+                return
+
+
+def main():
+    rospy.init_node("tamp")
+    hsrb_robot = hsrb_interface.Robot()
+    hsrb_gripper = hsrb_robot.get("gripper")
+    while not rospy.is_shutdown():
+        try:
+            whole_body = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
+            whole_body.set_pose_reference_frame("map")
+            scene = moveit_commander.PlanningSceneInterface()
+            
+            whole_body.allow_replanning(True)
+            whole_body.set_planning_time(10)
+            whole_body.set_max_velocity_scaling_factor(0.7)
+            break
+        except RuntimeError as e:
+            print("Failed to launch, retrying ", e)
+            rospy.sleep(1.0)
+
+    # Add objects to scene
+    object_name = "ycb_003_cracker_box"
+    obj_pose = add_object(scene, object_name)
+    print(obj_pose)
+    table_pose = add_object(scene, 'kitchen_table')
+
+    # Set robot initial configuration
+    initial_conf = Conf(whole_body.get_current_state())
+
+    # Read PDDL files
+    domain_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl")
+    stream_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl")
+
+    # Initial state
+    init = [
+        ("Arm", "arm"),
+        ("Surf", "kitchen_table"),
+        ("Item", object_name),
+        ("HandEmpty", "arm"),
+        ("Conf", initial_conf),
+        ("AtConf", initial_conf),
+        ("Pose", object_name, obj_pose.pose),
+        ("AtPose", object_name, obj_pose.pose),
+    ]
+
+    # Goal state
+    goal = ("Holding", "arm", object_name)
+    
+    stream_map = {
+        "sample-grasp": from_list_fn(get_grasp_gen(scene)),
+        "plan-pick": from_gen_fn(pick_motion(whole_body)),
+    }
+
+    pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
+    solution = solve(pddl_problem)
+    if solution is None:
+        rospy.loginfo("No solution found")
+        return
+
+    # Execute the solution
+    plan, cost, evaluations = solution
+    if plan is None:
+        rospy.loginfo("Failed to find a plan")
+        return
+    
+    rospy.loginfo("Executing the plan: %s", plan)
+    post_process(whole_body, hsrb_gripper, plan)
+
+
+if __name__ == "__main__":
+    main()
