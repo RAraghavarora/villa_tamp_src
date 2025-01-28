@@ -23,6 +23,7 @@ from control_msgs.msg import GripperCommandAction, GripperCommandGoal
 from gazebo_msgs.srv import GetModelState
 import hsrb_interface
 from utils import get_gazebo_state
+import copy
 
 GRASP_FORCE = 0.2
 HAND_TF = "hand_palm_link"
@@ -48,6 +49,26 @@ def add_object(scene, object_name):
     scene.add_box(object_name, pose_stamped, dimensions)
     return pose_stamped
 
+def add_object_real(scene, object_name):
+    pose_stamped = PoseStamped()
+    pose_stamped.header.frame_id = "map"
+    pose_stamped.pose.position.y = -1.46
+    pose_stamped.pose.position.z = 0.45
+
+    if object_name == "ycb_003_cracker_box":
+        dimensions = (0.05, 0.14, 0.19)
+        pose_stamped.pose.position.z += 0.05
+    elif object_name == "kitchen_table":
+        table_height = 0.45
+        pose_stamped.pose.position.x = -0.431
+        pose_stamped.pose.position.z = table_height / 2
+        dimensions = (0.55, 0.9, 0.45)
+    else:
+        pose_stamped.pose.position.x = -0.431 - 0.2
+        pose_stamped.pose.position.z += 0.05
+        dimensions = (0.1, 0.1, 0.1)
+    scene.add_box(object_name, pose_stamped, dimensions)
+    return pose_stamped
 
 def post_process(whole_body, hsrb_gripper, plan):
     for i, (name, args) in enumerate(plan):
@@ -56,7 +77,7 @@ def post_process(whole_body, hsrb_gripper, plan):
             arm, obj, pose, grasp, q, t = args
             if t is not None:
                 whole_body.execute(t)
-                hsrb_gripper.apply_force(0.2)
+                hsrb_gripper.apply_force(GRASP_FORCE)
             else:
                 rospy.logwarn("Plan not found in the grasp")
                 return
@@ -82,16 +103,19 @@ def main():
 
     # Add objects to scene
     object_name = "ycb_003_cracker_box"
-    obj_pose = add_object(scene, object_name)
+    object_name = "apple"
+    obj_pose = add_object_real(scene, object_name)
     print(obj_pose)
-    table_pose = add_object(scene, 'kitchen_table')
+    table_pose = add_object_real(scene, 'kitchen_table')
 
     # Set robot initial configuration
-    initial_conf = Conf(whole_body.get_current_state())
+    # breakpoint()
+    joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
+    initial_conf = Conf(joint_state)
 
     # Read PDDL files
-    domain_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl")
-    stream_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl")
+    domain_pddl = read("/home/backpack/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl")
+    stream_pddl = read("/home/backpack/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl")
 
     # Initial state
     init = [
