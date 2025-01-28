@@ -6,6 +6,7 @@ import moveit_commander
 import numpy as np
 from tf import transformations as T
 from visualization_msgs.msg import Marker
+from hsrb_interface import geometry
 
 from pddlstream.algorithms.meta import solve  # type: ignore
 from pddlstream.utils import read  # type: ignore
@@ -24,6 +25,38 @@ from gazebo_msgs.srv import GetModelState
 import hsrb_interface
 from utils import get_gazebo_state
 import copy
+
+from dynamic_scene_graph.srv import StartScan, StartScanRequest, FinishScan, FinishScanRequest
+import rospy
+
+from anygrasp_ros.srv import GetGrasps, GetGraspsRequest
+from anygrasp_ros.msg import Grasp
+from anygrasp_ros.ros_utils import create_grasp_marker_msg
+from moveit_msgs.msg import Grasp as moveGrasp
+from tf.transformations import euler_from_quaternion
+
+def get_grasp(data):
+    client = rospy.ServiceProxy("/anygrasp/get_grasps", GetGrasps)
+    object_data = None
+    for obj in data.objects:
+        if obj.label == 'apple':
+            object_data = obj
+        else:
+            print(obj.label)
+    if not object_data:
+        print("Apple not found")
+        return
+    
+    rospy.wait_for_service("/anygrasp/get_grasps")
+    req = GetGraspsRequest()
+    req.point_cloud = object_data.cropped_point_cloud
+    req.obj_indices = object_data.obj_indices
+    req.obj_bbox = object_data.bbox
+    req.gripper_height = 0.02
+
+    response = client(req)
+    print("Number of grasp poses detected = ", len(response.grasps))
+    return response.grasps
 
 GRASP_FORCE = 0.2
 HAND_TF = "hand_palm_link"
@@ -54,6 +87,12 @@ def add_object_real(scene, object_name):
     pose_stamped.header.frame_id = "map"
     pose_stamped.pose.position.y = -1.46
     pose_stamped.pose.position.z = 0.45
+    
+    if object_name == 'apple':
+        dimensions = (0.1,0.1,0.1)
+        # pose_stamped.pose.position.x = -0.92
+        # pose_stamped.pose.position.y = 2.93
+        # pose_stamped.pose.position.z = 0.56
 
     if object_name == "ycb_003_cracker_box":
         dimensions = (0.05, 0.14, 0.19)
@@ -63,12 +102,27 @@ def add_object_real(scene, object_name):
         pose_stamped.pose.position.x = -0.431
         pose_stamped.pose.position.z = table_height / 2
         dimensions = (0.55, 0.9, 0.45)
+        # table_height = 0.56
+        # pose_stamped.pose.position.x = -0.92
+        # pose_stamped.pose.position.y = 2.93 + 0.2
+        # pose_stamped.pose.position.z = table_height/2
+        # dimensions = (1.2,0.4,table_height)
     else:
         pose_stamped.pose.position.x = -0.431 - 0.2
         pose_stamped.pose.position.z += 0.05
         dimensions = (0.1, 0.1, 0.1)
     scene.add_box(object_name, pose_stamped, dimensions)
     return pose_stamped
+
+def add_wall(scene, coordinates, dimensions, index):
+    pose_stamped = PoseStamped()
+    pose_stamped.header.frame_id = "map"
+    pose_stamped.pose.position.x = coordinates[0]
+    pose_stamped.pose.position.y = coordinates[1]
+    pose_stamped.pose.position.z = coordinates[2]
+    scene.add_box('wall_%d'%index, pose_stamped, dimensions)
+    return pose_stamped
+
 
 def post_process(whole_body, hsrb_gripper, plan):
     for i, (name, args) in enumerate(plan):
@@ -82,11 +136,29 @@ def post_process(whole_body, hsrb_gripper, plan):
                 rospy.logwarn("Plan not found in the grasp")
                 return
 
+def rospose_to_se3(pose):
+    g = T.quaternion_matrix([pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w])
+    g = np.dot(T.translation_matrix([pose.position.x, pose.position.y, pose.position.z]), g)
+    return g
+
+def se3_to_rospose(pose):
+    q = T.quaternion_from_matrix(pose)
+    t = T.translation_from_matrix(pose)
+    p = Pose()
+    p.position.x = t[0]
+    p.position.y = t[1]
+    p.position.z = t[2]
+    p.orientation.x = q[0]
+    p.orientation.y = q[1]
+    p.orientation.z = q[2]
+    p.orientation.w = q[3]
+    return p
 
 def main():
     rospy.init_node("tamp")
     hsrb_robot = hsrb_interface.Robot()
     hsrb_gripper = hsrb_robot.get("gripper")
+    hsrb_whole_body = hsrb_robot.get("whole_body")
     while not rospy.is_shutdown():
         try:
             whole_body = moveit_commander.MoveGroupCommander("whole_body", wait_for_servers=0.0)
@@ -108,10 +180,72 @@ def main():
     print(obj_pose)
     table_pose = add_object_real(scene, 'kitchen_table')
 
+    # wall_1 = add_wall(scene, [-0.431, -1.46 -0.45, 1], [3,0.1,2], 1)
+    # wall_2 = add_wall(scene, [-0.431 + 1, -1.46, 1], [0.1,3,2], 2)
+    apple_wall = add_wall(scene, [-0.425, 3.03, 0.59], [0.1, 0.1, 0.1], 1)
     # Set robot initial configuration
     # breakpoint()
     joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
     initial_conf = Conf(joint_state)
+
+    start_client = rospy.ServiceProxy("/scene_graph/start_scan", StartScan)
+    finish_client = rospy.ServiceProxy("/scene_graph/finish_scan", FinishScan)
+
+    location = rospy.get_param('~table', "kitchen_table")
+
+    rospy.wait_for_service("/scene_graph/start_scan")
+    response = start_client(StartScanRequest(location))
+    print(response)
+
+    rospy.wait_for_service("/scene_graph/finish_scan")
+    req = FinishScanRequest()
+    req.request_point_cloud = True
+    req.request_feature = True
+
+    response = finish_client(req)
+
+    grasps = get_grasp(response)
+    if grasps is None:
+        print("No object found")
+        return
+    print(grasps[0])
+    for grasp in grasps:
+        grasp_to_map = rospose_to_se3(grasp.pose)
+        pre_grasp_to_map = np.dot(grasp_to_map, T.translation_matrix([0,0,-0.1]))
+        
+        pre_grasp_pose = se3_to_rospose(pre_grasp_to_map)
+        q_x = pre_grasp_pose.orientation.x
+        q_y = pre_grasp_pose.orientation.y
+        q_z = pre_grasp_pose.orientation.z
+        q_w = pre_grasp_pose.orientation.w
+        e_grasp = euler_from_quaternion([q_x, q_y, q_z, q_w])
+        x = pre_grasp_pose.position.x
+        y = pre_grasp_pose.position.y
+        z = pre_grasp_pose.position.z
+        hsrb_grasp = geometry.pose(x, y, z, e_grasp[0], e_grasp[1], e_grasp[2])
+        hsrb_whole_body.move_end_effector_pose(hsrb_grasp, 'map')
+        break
+        # grasp_instance = PoseStamped()
+        # grasp_instance.header.frame_id = 'map'
+        # grasp_instance.pose = grasp.pose
+
+        # grasp_move = moveGrasp()
+        # grasp_move.id = f"grasp_1"
+        # grasp_move.grasp_pose = grasp_instance
+        # grasp_move.max_contact_force = 0.5
+
+        # whole_body.set_pose_target(grasp_instance)
+        # whole_body.pick('wall_1', grasp_move)
+        # plan = whole_body.plan()
+        # if plan[0]:
+        #     print("Plan successful! \n Executing...")
+        #     whole_body.execute(plan[1])
+        #     break
+    hsrb_gripper.command(1.0)
+    hsrb_whole_body.move_end_effector_by_line((0,0,1),0.07)
+    hsrb_gripper.apply_force(0.2, delicate=True)
+    breakpoint()
+    ###############################################################
 
     # Read PDDL files
     domain_pddl = read("/home/backpack/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl")

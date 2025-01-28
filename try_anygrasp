@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+
+from dynamic_scene_graph.srv import StartScan, StartScanRequest, FinishScan, FinishScanRequest
+import rospy
+
+from anygrasp_ros.srv import GetGrasps, GetGraspsRequest
+from anygrasp_ros.msg import Grasp
+from anygrasp_ros.ros_utils import create_grasp_marker_msg
+
+def get_grasp(data):
+    client = rospy.ServiceProxy("/anygrasp/get_grasps", GetGrasps)
+    object_data = None
+    for obj in data.objects:
+        if obj.label == 'apple':
+            object_data = obj
+        else:
+            print(obj.label)
+    if not object_data:
+        print("Apple not found")
+        return
+    
+    rospy.wait_for_service("/anygrasp/get_grasps")
+    req = GetGraspsRequest()
+    req.point_cloud = object_data.cropped_point_cloud
+    req.obj_indices = object_data.obj_indices
+    req.obj_bbox = object_data.bbox
+    req.gripper_height = 0.02
+
+    response = client(req)
+    print("Number of grasp poses detected = ", len(response.grasps))
+    breakpoint()
+    return response.grasps
+
+start_client = rospy.ServiceProxy("/scene_graph/start_scan", StartScan)
+finish_client = rospy.ServiceProxy("/scene_graph/finish_scan", FinishScan)
+
+location = rospy.get_param('~table', "kitchen_table")
+
+rospy.wait_for_service("/scene_graph/start_scan")
+response = start_client(StartScanRequest(location))
+print(response)
+
+rospy.wait_for_service("/scene_graph/finish_scan")
+req = FinishScanRequest()
+req.request_point_cloud = True
+req.request_feature = True
+
+response = finish_client(req)
+
+grasps = get_grasp(response)
+
