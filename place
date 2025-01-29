@@ -10,12 +10,12 @@ from visualization_msgs.msg import Marker
 from pddlstream.algorithms.meta import solve  # type: ignore
 from pddlstream.utils import read  # type: ignore
 from pddlstream.language.generator import from_fn, from_list_fn, from_list_gen_fn, from_gen_fn  # type: ignore
-from pddlstream.language.constants import PDDLProblem  # type: ignore
+from pddlstream.language.constants import PDDLProblem, NOT  # type: ignore
 
 from primitives import Conf
 from stream import (
     get_grasp_gen,
-    pick_motion,
+    get_place_gen,
 )
 from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
 from geometry_msgs.msg import PoseStamped, Pose
@@ -53,10 +53,10 @@ def post_process(whole_body, hsrb_gripper, plan):
     for i, (name, args) in enumerate(plan):
         rospy.loginfo("Step %d: %s %s", i, name, args)
         if name == "pick":
-            arm, obj, pose, grasp, q, t = args
-            if t is not None:
-                whole_body.execute(t)
-                hsrb_gripper.apply_force(0.2)
+            arm, object, pose, grasp, bq = args
+            if grasp.plan is not None:
+                whole_body.execute(grasp.plan)
+                hsrb_gripper.apply_force(GRASP_FORCE)
             else:
                 rospy.logwarn("Plan not found in the grasp")
                 return
@@ -80,49 +80,63 @@ def main():
             print("Failed to launch, retrying ", e)
             rospy.sleep(1.0)
 
+    robot_state = moveit_commander.RobotState()
+    joint_state = rospy.wait_for_message("/hsrb/joint_states", JointState, timeout=1.0)
+    robot_state.joint_state = joint_state
+    whole_body.set_start_state(robot_state)
+
+    robot_start_state = get_gazebo_state("hsrb")
+    start_base_values = robot_start_state.pose.position
+    start_base_conf = Conf(whole_body, ["world_joint"], start_base_values)
+
     # Add objects to scene
     object_name = "ycb_003_cracker_box"
     obj_pose = add_object(scene, object_name)
-    print(obj_pose)
     table_pose = add_object(scene, 'kitchen_table')
 
-    # Set robot initial configuration
-    initial_conf = Conf(whole_body.get_current_state())
-    q1 = "coffe_table_1"
-    q2 = "coffee_table_2"
-    q3 = "kitchen_table_1"
-    q4 = "kitchen_table_2"
+    goal_object_pose = PoseStamped()
+    goal_object_pose.header.frame_id = "map"
+    goal_object_pose.pose.position.x = 0.06
+    goal_object_pose.pose.position.y = 1.18
+    goal_object_pose.pose.position.z = 0.85
+    goal_object_pose.pose.orientation.w = 0.0
+    goal_object_pose.pose.orientation.x = 0.0
+    goal_object_pose.pose.orientation.y = 8.88
+    goal_object_pose.pose.orientation.z = 0.0
 
     # Read PDDL files
-    domain_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl")
-    stream_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/stream.pddl")
+    domain_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_domain_new.pddl")
+    stream_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/pick_place_stream_new.pddl")
 
     # Initial state
     init = [
         ("Arm", "arm"),
-        ("Surf", "kitchen_table"),
-        ("Item", object_name),
-        ("HandEmpty", "arm"),
-        ("Conf", initial_conf),
-        ("Conf", q1),
-        ("Conf", q2),
-        ("Conf", q3),
-        ("Conf", q4),
-        ("AtConf", initial_conf),
-        ("Pose", object_name, obj_pose.pose),
+        ("Loc", "kitchen_table"),
+        ("BConf", start_base_conf),
+        ("AtBConf", start_base_conf),
+        ("Object", object_name),
+        ("Holding", object_name),
         ("AtPose", object_name, obj_pose.pose),
-    ]
+        ("Graspable", object_name),
 
-    # Goal state
-    goal = ("Holding", "arm", object_name)
+        # ("Clear", object_name),
+        ("Pose", object_name, obj_pose.pose),
+    ]
+    
+    goal = ("Clear", object_name)
+
+    grasp_gen = get_grasp_gen(whole_body, obj_pose, hsrb_gripper)
+    place_gen = get_place_gen(whole_body, table_pose)
     
     stream_map = {
-        "sample-grasp": from_list_fn(get_grasp_gen(scene)),
-        "plan-pick": from_gen_fn(pick_motion(whole_body)),
+        "sample-grasp": from_list_fn(grasp_gen),
+        "sample-place": from_gen_fn(place_gen),
+        # "sample-place": from_fn(place_gen)
     }
 
     pddl_problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
     solution = solve(pddl_problem)
+    breakpoint()
     if solution is None:
         rospy.loginfo("No solution found")
         return

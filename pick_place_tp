@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+from sensor_msgs.msg import JointState
+import time
+import rospy
+import moveit_commander
+import numpy as np
+from tf import transformations as T
+from visualization_msgs.msg import Marker
+
+from pddlstream.algorithms.meta import solve  # type: ignore
+from pddlstream.utils import read  # type: ignore
+from pddlstream.language.generator import from_fn, from_list_fn, from_list_gen_fn, from_gen_fn  # type: ignore
+from pddlstream.language.constants import PDDLProblem, Equal, print_solution  # type: ignore
+from examples.discrete_belief.dist import UniformDist, DDist
+from examples.discrete_belief.run import revisit_mdp_cost, clip_cost
+
+from primitives import Conf
+from belief import BeliefState
+from co_obs import CorrelationalObsModel
+from tmc_control_msgs.msg import GripperApplyEffortAction, GripperApplyEffortGoal
+from geometry_msgs.msg import PoseStamped, Pose
+from control_msgs.msg import GripperCommandAction, GripperCommandGoal
+from gazebo_msgs.srv import GetModelState
+import hsrb_interface
+from utils import get_gazebo_state
+import pprint
+
+GRASP_FORCE = 0.2
+HAND_TF = "hand_palm_link"
+
+
+def get_uniform_belief(objects:list, surfaces: list):
+    # P(obj at loc)
+    dist = {}
+    for object in objects:
+        dist[object] = UniformDist(surfaces)
+    return dist
+
+def get_initial_visibility(surfaces: list):
+    visibility = {}
+    for surf in surfaces:
+        visibility[surf] = 0.0
+    return visibility
+
+def get_true_state():
+    state = {'kitchen_table': {'kitchen_table_1': ['banana'], 'kitchen_table_2': ['apple']},
+        'coffee_table': {'coffee_table_1': [], 'coffee_table_2': []},
+        'bench': {'bench_1': []}}
+    return state
+
+def check_goal(target_obj: str, target_surf: str, b_state: BeliefState):
+    return b_state.belief[target_obj].prob(target_surf) == 1
+
+def post_process(whole_body, hsrb_gripper, plan):
+    for i, (name, args) in enumerate(plan):
+        rospy.loginfo("Step %d: %s %s", i, name, args)
+        if name == "pick":
+            arm, obj, pose, grasp, q, t = args
+            if t is not None:
+                whole_body.execute(t)
+                hsrb_gripper.apply_force(0.2)
+            else:
+                rospy.logwarn("Plan not found in the grasp")
+                return
+
+def pddlstrea_problem(b_state: BeliefState):
+    # Read PDDL files
+    domain_pddl = read("/home/rchome/workspaces/raghav_ws/src/villa_tamp/src/pddl/domain.pddl")
+    stream_pddl = None
+    stream_map = {}
+    
+    init = [("Arm", b_state.arm)]
+    if b_state.hand_empty:
+        init += [("HandEmpty", b_state.arm)]
+    for obj in b_state.objects:
+        init += [("Item", obj)]
+    for surf in b_state.surfaces:
+        init += [("Surf", surf)]
+    for config in b_state.configs:
+        init += [("Conf", config)]
+    for config, surf in b_state.configs.items():
+        init += [("At", config, surf)]
+    for obj in b_state.objects:
+        if obj not in b_state.known:
+            init += [("Uncertain", obj)]
+    for visited in b_state.visited:
+        init += [("Detected", visited)]
+    init += [("AtConf", b_state.robotAt)]
+    # Goal state
+    goal = ("At", "apple", "coffee_table")
+
+    init += [
+        Equal(('PickCost',), 0),
+        Equal(('PlaceCost',), 0),
+    ]
+    for obj in b_state.objects:
+        for surf in b_state.surfaces:
+            prob = b_state.belief[obj].prob(surf)
+            cost = revisit_mdp_cost(0, 1, prob)
+            init += [Equal(('DetectCost', obj, surf), clip_cost(cost))]
+    
+    problem = PDDLProblem(domain_pddl, {}, stream_pddl, stream_map, init, goal)
+    planner = 'max-astar'
+    solution = solve(problem, planner=planner)
+    print_solution(solution)
+    plan, cost, evaluations = solution
+    print("cost is: ", cost)
+    return plan
+
+def execute_plan(true_state: dict, co_obs: CorrelationalObsModel, b_state, name: str, args: list):
+    if name == "pick":
+        arm, obj, surf, q = args
+        print("pick", arm, obj, surf, q)
+        b_state.robotAt = q
+        b_state.hand_empty = False
+        b_state.belief[obj].setProb(surf, 0)
+    elif name == "place":
+        arm, obj, surf, q1, q2 = args
+        print("place", arm, obj, surf, q1, q2)
+        b_state.robotAt = q2
+        b_state.hand_empty = True
+        b_state.belief[obj].setProb(surf, 1)
+    elif name == "detect":
+        obj, surf, q1, q2 = args
+        # observation
+        obs = obj in true_state[surf][q2]
+        # detected object
+        detected_objs = set()
+        for detected_obj in true_state[surf][q2]:
+            detected_objs.add(detected_obj)
+        # update visited
+        b_state.visited.add(q2)
+        # calculate visibility
+        b_state.visibility[surf] += 0.5
+        # update robot config
+        b_state.robotAt = q2
+        # update belief
+        co_obs.correlationUpdate(obj, detected_objs, surf, b_state.visibility[surf], 0, 0, b_state, obs)
+        b_state.known.update(detected_objs)
+        return obs
+    return True
+
+def main():
+    objects = ['apple', 'banana']
+    surfaces = ['kitchen_table', 'coffee_table', 'bench']
+    configs = {
+        'start': None,
+        'coffee_table_1': 'coffee_table',
+        'coffee_table_2': 'coffee_table',
+        'kitchen_table_1': 'kitchen_table',
+        'kitchen_table_2': 'kitchen_table',
+        'bench_1': 'bench'
+    }
+    belief = get_uniform_belief(objects, surfaces)
+    visibility = get_initial_visibility(surfaces)
+    b_state = BeliefState(arm="arm", hand_empty=True, robotAt="start", objects=objects,
+                          surfaces=surfaces, configs=configs, belief=belief,
+                          visibility=visibility, visited=set(), known=set())
+
+    # Execute the solution
+    co_obs = CorrelationalObsModel(use_correlation=True)
+    true_state = get_true_state()
+    
+    for i in range(10):
+        if check_goal('apple', 'coffee_table', b_state):
+            break
+        plan = pddlstrea_problem(b_state)
+        for name, args in plan:
+            if not execute_plan(true_state, co_obs, b_state, name, args):
+                print("failed to execute", name, args)
+                break
+            print("successfully executed", name, args)
+        print(b_state.belief)
+    # rospy.loginfo("Executing the plan: %s", plan)
+    # post_process(whole_body, hsrb_gripper, plan)
+
+
+if __name__ == "__main__":
+    main()
+
+# Baseline Plan:
+# detect apple coffee_table start coffee_table_1
+# detect apple kitchen_table coffee_table_1 kitchen_table_1
+# detect apple bench kitchen_table_1 bench_1
+# detect apple coffee_table bench_1 coffee_table_2
+# detect apple kitchen_table coffee_table_2 kitchen_table_2
+# pick arm apple kitchen_table kitchen_table_2
+# place arm apple coffee_table kitchen_table_2 coffee_table_1
+
+# Co-Model:
+# detect apple coffee_table start coffee_table_1
+# detect apple kitchen_table coffee_table_1 kitchen_table_1
+# detect apple kitchen_table kitchen_table_1 kitchen_table_2
+# pick arm apple kitchen_table kitchen_table_2
+# place arm apple coffee_table kitchen_table_2 coffee_table_1

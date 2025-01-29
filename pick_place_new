@@ -117,7 +117,7 @@ def main():
     goal = ("Holding", object_name)
 
     grasp_gen = get_grasp_gen(whole_body, obj_pose, hsrb_gripper)
-    place_gen = get_place_gen(whole_body, table_pose, hsrb_gripper)
+    place_gen = get_place_gen(whole_body, table_pose)
     
     stream_map = {
         "sample-grasp": from_list_fn(grasp_gen),
