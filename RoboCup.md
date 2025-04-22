@@ -23,3 +23,28 @@
    - Make sure the robot is turned on and connected to the laptop (terminal should show `aus up`). Then do `ssh_robot_admin` to SSH into the robot.
    - **On the HSRB** Run `configure_map ~/maps/<your_map_name>`. This will ask for the sudo password. Find it at: [Robot logins](https://github.com/AustinVillaatHome/documentation/wiki/Accounts)
  - **On the backpack** Create the knowledge database using: `prepare_knowledge_villa <knowledge_folder> <maps_folder>`
+
+# Running a task
+
+- After robot is running, and connected to the backpack, go to villa/villa_launch/config and run
+`rviz -d villa/villa_launch/config villa_display.rviz`
+- Localize the robot in rviz using '2d pose estimate' button
+- Start necessary servers:
+  - Dynamic Scene Graph
+    ```
+    conda activate ovir3d
+    roscd dynamic_scene_graph
+    python scripts/dynamic_scene_graph_server.py
+    ```
+  - Anygrasp
+    ```
+    conda activate anygrasp
+    roscd anygrasp_ros
+    python scripts/anygrasp_server.py
+    ```
+  - Text to speech
+    ```
+    roscd villa_speech
+    python text_to_speech_server.py
+    ```
+- Run the necessary task: `rosrun pick_and_place storing_groceries`
