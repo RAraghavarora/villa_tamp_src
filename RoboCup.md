@@ -23,6 +23,7 @@
    - Make sure the robot is turned on and connected to the laptop (terminal should show `aus up`). Then do `ssh_robot_admin` to SSH into the robot.
    - **On the HSRB** Run `configure_map ~/maps/<your_map_name>`. This will ask for the sudo password. Find it at: [Robot logins](https://github.com/AustinVillaatHome/documentation/wiki/Accounts)
  - **On the backpack** Create the knowledge database using: `prepare_knowledge_villa <knowledge_folder> <maps_folder>`
+ - rosrun knowledge_representation populate_with_map <dir>
 
 # Running a task
 
