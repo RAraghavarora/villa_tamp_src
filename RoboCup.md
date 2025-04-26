@@ -30,7 +30,7 @@
 - After robot is running, and connected to the backpack, go to villa/villa_launch/config and run
 `rviz -d villa/villa_launch/config villa_display.rviz`
 - Localize the robot in rviz using '2d pose estimate' button
-- Start necessary servers:
+- Start necessary servers: [Check the documentation for villa_state_machines](https://github.com/AustinVillaatHome/villa_state_machines)
   - Dynamic Scene Graph
     ```
     conda activate ovir3d
