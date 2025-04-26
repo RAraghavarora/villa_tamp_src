@@ -17,7 +17,7 @@
  - Moving the map (non-annotated) to the robot:
    - ```
      cd ~/maps/
-     rsync -havz ./<your_map_name> austin@austin-hsrb:/home/austin/maps/<your_map_name>
+     rsync -havz ./<your_map_name> austin@austin-hsrb.local:/home/austin/maps/<your_map_name>
      ```
  - Choosing the new map on the robot:
    - Make sure the robot is turned on and connected to the laptop (terminal should show `aus up`). Then do `ssh_robot_admin` to SSH into the robot.
